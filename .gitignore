@@ -1,3 +1,4 @@
 /target
 /dist
 *.exe
+!/assets/pawnio/PawnIO_setup.exe

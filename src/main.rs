@@ -20,6 +20,11 @@ const GAP: f32 = 10.0;
 const GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 fn main() -> eframe::Result {
+    #[cfg(windows)]
+    if std::env::args().any(|a| a == "--install-pawnio") {
+        platform::install_pawnio();
+        return Ok(());
+    }
     let icon = eframe::icon_data::from_png_bytes(theme::ICON).expect("bundled icon is a valid PNG");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -134,15 +139,18 @@ fn charts(state: &State, t: &Tokens) -> Vec<Chart> {
     let vram_total = info.vram_total;
     let net_max = s.iter().map(|x| x.net_down.max(x.net_up)).fold(64.0 * 1024.0, f64::max) * 1.15;
 
-    let temp = |label: &str, color, f: fn(&Sample) -> f32| {
+    let temp = |label: &str, color, f: fn(&Sample) -> f32, missing: &str| {
         let v = last.map(f).unwrap_or(f32::NAN);
-        let mut series = series(label, color, col(&|x| f(x)), if v.is_finite() { format!("{v:.0}°C") } else { "n/a".into() });
+        let mut series = series(label, color, col(&|x| f(x)), if v.is_finite() { format!("{v:.0}°C") } else { missing.into() });
         series.text_color = if v >= 85.0 { Some(t.danger) } else if v >= 70.0 { Some(t.warning) } else { None };
         series
     };
-    let mut temps = vec![temp("CPU", t.info, |x| x.cpu_temp), temp("GPU", t.warning, |x| x.gpu.temp)];
+    let mut temps = vec![
+        temp("CPU", t.info, |x| x.cpu_temp, if info.cpu_temp_hint.is_empty() { "n/a" } else { info.cpu_temp_hint }),
+        temp("GPU", t.warning, |x| x.gpu.temp, "n/a"),
+    ];
     if info.has_igpu {
-        temps.push(temp("iGPU", t.muted, |x| x.gpu.igpu_temp));
+        temps.push(temp("iGPU", t.muted, |x| x.gpu.igpu_temp, "n/a"));
     }
 
     let palette = [t.info, t.warning, t.success, t.muted, t.danger];

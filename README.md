@@ -20,7 +20,7 @@
 | GPU | Load, VRAM |
 | Temperature | CPU, GPU, integrated GPU (turns amber at 70 °C, red at 85 °C) |
 
-It samples once per second. The window shows one column when narrow and two when wide, and follows the system light or dark theme. No driver, admin or root rights are needed.
+It samples once per second. The window shows one column when narrow and two when wide, and follows the system light or dark theme. Everything except the Windows CPU temperature works without a driver or admin rights.
 
 ## What each OS can show
 
@@ -31,9 +31,18 @@ It samples once per second. The window shows one column when narrow and two when
 | Network | Yes | Yes | Yes (en* interfaces) |
 | GPU load, VRAM | Yes, any vendor | AMD only (amdgpu) | Yes; memory shown against RAM, which the GPU shares |
 | GPU temperature | Yes, same source as Task Manager | AMD only | No public API |
-| CPU temperature | No: Windows needs a kernel driver for it | Yes (k10temp, coretemp) | Apple silicon die sensors |
+| CPU temperature | AMD Ryzen, with PawnIO and admin rights (see below) | Yes (k10temp, coretemp) | Apple silicon die sensors |
 
 Where a value is not available, the legend shows `n/a`.
+
+## CPU temperature on Windows
+
+Windows has no way to read an AMD CPU temperature without a kernel driver. Vitals bundles [PawnIO](https://pawnio.eu), the Microsoft-signed driver LibreHardwareMonitor also uses, which only runs signed, purpose-built modules.
+
+1. Once: run `vitals-windows-x64.exe --install-pawnio` and accept the UAC prompt. This runs the bundled PawnIO 2.2.0 installer.
+2. Run Vitals as administrator. The PawnIO device only accepts administrators; without admin rights the legend shows `needs admin` and everything else works as usual.
+
+Supported: AMD Ryzen and EPYC from Zen to Zen 5 (families 17h to 1Ah). Not yet: Intel. Tested on a Ryzen 9 7950X with Memory Integrity on. Bundled file versions and licenses are listed in [`assets/pawnio`](assets/pawnio/README.md).
 
 ## Download and run
 
@@ -45,7 +54,7 @@ Prebuilt binaries are on the [Releases](../../releases) page.
 
 ## Resource use
 
-Measured on Windows 11 with a Ryzen 9 7950X and a Radeon RX 7900 XT: about 0% CPU, a 4.7 MB executable, and about 105 MB of private memory, most of it the graphics driver's OpenGL runtime.
+Measured on Windows 11 with a Ryzen 9 7950X and a Radeon RX 7900 XT: about 0% CPU and 60 to 110 MB of private memory depending on the moment, most of it the graphics driver's OpenGL runtime. Reading the CPU temperature through PawnIO adds no measurable cost. The executable is 8 MB, 3.3 MB of which is the PawnIO installer, only used by `--install-pawnio`.
 
 ## Build
 

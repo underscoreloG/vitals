@@ -1,10 +1,17 @@
 //! Windows: network from the interface table, GPU load, VRAM and disk activity
 //! from PDH, GPU temperatures from D3DKMT (the same source Task Manager uses).
-//! No driver needed.
+//! None of that needs a driver. CPU temperature does: it comes from the PawnIO
+//! driver when it is installed and Vitals runs as administrator.
 
 use crate::sample::Gpu;
 use std::collections::HashMap;
 use std::ffi::c_void;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::Threading::{CreateMutexW, INFINITE, ReleaseMutex, WaitForSingleObject};
+use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::core::{HSTRING, s};
 use windows::Wdk::Graphics::Direct3D::{
     D3DKMT_ADAPTER_PERFDATA, D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO, D3DKMTOpenAdapterFromLuid,
     D3DKMTQueryAdapterInfo, KMTQAITYPE_ADAPTERPERFDATA,
@@ -31,6 +38,9 @@ pub struct Platform {
     pub gpu_name: String,
     pub vram_total: f64,
     pub has_igpu: bool,
+    /// Legend text while there is no CPU temperature.
+    pub cpu_temp_hint: &'static str,
+    pawnio: Option<PawnIo>,
     pub disk_names: Vec<String>,
     disk_keys: Vec<String>,
     disk_query: PDH_HQUERY,
@@ -69,11 +79,17 @@ impl Platform {
         let mut disk_keys: Vec<String> =
             counter_items(disk_idle).into_iter().map(|(name, _)| name).filter(|n| n != "_total").collect();
         disk_keys.sort_by_key(|k| disk_label(k));
+        let (pawnio, cpu_temp_hint) = match PawnIo::open() {
+            Ok(p) => (Some(p), "n/a"),
+            Err(hint) => (None, hint),
+        };
 
         Self {
             gpu_name: dgpu.as_ref().map_or("GPU".into(), |g| g.name.clone()),
             vram_total: dgpu.as_ref().map_or(0.0, |g| g.vram),
             has_igpu: igpu.is_some(),
+            cpu_temp_hint,
+            pawnio,
             disk_names: disk_keys.iter().map(|k| disk_label(k)).collect(),
             disk_keys,
             disk_query,
@@ -126,12 +142,102 @@ impl Platform {
         Gpu { load, vram_used, temp: temperature(&self.dgpu), igpu_temp: temperature(&self.igpu) }
     }
 
+    pub fn cpu_temp(&mut self) -> f32 {
+        self.pawnio.as_ref().map_or(f32::NAN, PawnIo::tctl)
+    }
+
     /// Active time per physical disk, in the order of `disk_names`, like Task Manager.
     pub fn disks(&mut self) -> Vec<f32> {
         unsafe { PdhCollectQueryData(self.disk_query) };
         let idle: HashMap<String, f64> = counter_items(self.disk_idle).into_iter().collect();
         self.disk_keys.iter().map(|k| idle.get(k).map_or(f32::NAN, |v| (100.0 - v).clamp(0.0, 100.0) as f32)).collect()
     }
+}
+
+const PAWNIO_SETUP: &[u8] = include_bytes!("../../assets/pawnio/PawnIO_setup.exe");
+const AMD_MODULE: &[u8] = include_bytes!("../../assets/pawnio/AMDFamily17.bin");
+
+type PawnOpen = unsafe extern "system" fn(*mut HANDLE) -> i32;
+type PawnLoad = unsafe extern "system" fn(HANDLE, *const u8, usize) -> i32;
+type PawnExecute = unsafe extern "system" fn(HANDLE, *const u8, *const u64, usize, *mut u64, usize, *mut usize) -> i32;
+
+/// AMD Zen (family 17h to 1Ah) CPU temperature through PawnIO's AMDFamily17 module.
+struct PawnIo {
+    handle: HANDLE,
+    execute: PawnExecute,
+    /// Hardware tools share the PCI index/data registers through this named mutex.
+    pci_mutex: HANDLE,
+}
+
+impl PawnIo {
+    /// Err carries the legend hint: PawnIO is missing or this is not an AMD Zen CPU
+    /// ("n/a"), or the device refused a non-administrator ("needs admin").
+    fn open() -> Result<Self, &'static str> {
+        let dir = std::env::var("ProgramFiles").map_err(|_| "n/a")?;
+        let lib = unsafe { LoadLibraryW(&HSTRING::from(format!("{dir}\\PawnIO\\PawnIOLib.dll"))) }.map_err(|_| "n/a")?;
+        let (Some(open), Some(load), Some(execute)) = (unsafe {
+            (GetProcAddress(lib, s!("pawnio_open")), GetProcAddress(lib, s!("pawnio_load")), GetProcAddress(lib, s!("pawnio_execute")))
+        }) else {
+            return Err("n/a");
+        };
+        let (open, load, execute): (PawnOpen, PawnLoad, PawnExecute) =
+            unsafe { (std::mem::transmute(open), std::mem::transmute(load), std::mem::transmute(execute)) };
+
+        let mut handle = HANDLE::default();
+        if unsafe { open(&mut handle) } < 0 {
+            return Err("needs admin");
+        }
+        if unsafe { load(handle, AMD_MODULE.as_ptr(), AMD_MODULE.len()) } < 0 {
+            return Err("n/a");
+        }
+        let pci_mutex = unsafe { CreateMutexW(None, false, w!("Global\\Access_PCI")) }.map_err(|_| "n/a")?;
+        Ok(Self { handle, execute, pci_mutex })
+    }
+
+    /// Tctl in degrees C, from SMN register THM_TCON_CUR_TMP (0x59800).
+    fn tctl(&self) -> f32 {
+        let (input, mut output, mut written) = ([0x0005_9800u64], [0u64], 0usize);
+        unsafe {
+            let wait = WaitForSingleObject(self.pci_mutex, 100);
+            if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
+                return f32::NAN;
+            }
+            let hr = (self.execute)(self.handle, c"ioctl_read_smn".as_ptr().cast(), input.as_ptr(), 1, output.as_mut_ptr(), 1, &mut written);
+            let _ = ReleaseMutex(self.pci_mutex);
+            if hr < 0 {
+                return f32::NAN;
+            }
+        }
+        let raw = output[0] as u32;
+        let t = ((raw >> 21) & 0x7FF) as f32 * 0.125;
+        // Range select (bit 19), or both TJ_SEL bits (17:16), shift the scale by 49 C.
+        if raw & 0x8_0000 != 0 || raw & 0x3_0000 == 0x3_0000 { t - 49.0 } else { t }
+    }
+}
+
+/// `vitals --install-pawnio`: runs the embedded PawnIO installer, with one UAC prompt.
+pub fn install_pawnio() {
+    let path = std::env::temp_dir().join("PawnIO_setup.exe");
+    if std::fs::write(&path, PAWNIO_SETUP).is_err() {
+        return;
+    }
+    let file = HSTRING::from(path.as_os_str());
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: w!("runas"),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: w!("-install"),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    unsafe {
+        if ShellExecuteExW(&mut info).is_ok() && !info.hProcess.is_invalid() {
+            WaitForSingleObject(info.hProcess, INFINITE);
+            let _ = CloseHandle(info.hProcess);
+        }
+    }
+    let _ = std::fs::remove_file(&path);
 }
 
 /// PDH instance to label: "3 c: g:" becomes "C: G:", a disk without a letter "Disk 4".

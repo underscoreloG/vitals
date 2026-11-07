@@ -34,6 +34,8 @@ pub struct Info {
     pub vram_total: f64,
     pub has_igpu: bool,
     pub disk_names: Vec<String>,
+    /// Legend text while there is no CPU temperature, such as "needs admin".
+    pub cpu_temp_hint: &'static str,
 }
 
 pub struct Sampler {
@@ -58,6 +60,7 @@ impl Sampler {
             vram_total: platform.vram_total,
             has_igpu: platform.has_igpu,
             disk_names: platform.disk_names.clone(),
+            cpu_temp_hint: platform.cpu_temp_hint,
         };
         Self {
             info,
@@ -92,10 +95,10 @@ impl Sampler {
         }
     }
 
-    /// Windows has no CPU temperature without a kernel driver.
+    /// Windows has no CPU temperature without a kernel driver; the platform uses PawnIO.
     #[cfg(windows)]
     fn cpu_temp(&mut self) -> f32 {
-        f32::NAN
+        self.platform.cpu_temp()
     }
 
     /// Hottest CPU sensor: k10temp/zenpower (AMD) and coretemp (Intel) on Linux,
