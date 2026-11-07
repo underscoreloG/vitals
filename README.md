@@ -2,12 +2,18 @@
 
 <h1 align="center">Vitals</h1>
 
-<p align="center">A small performance monitor with nothing to click. One window, one graph per component, the last two minutes of history.<br>Rust + egui, for Windows, Linux and macOS.</p>
+<p align="center">A small performance monitor. One line of live values per component, or one graph each with the last two minutes of history.<br>Rust + egui, for Windows, Linux and macOS.</p>
 
 <p align="center">
-  <img src="docs/windows.png" width="300" alt="Vitals on Windows, narrow window">
-  <img src="docs/windows-wide.png" width="520" alt="Vitals on Windows, wide window">
+  <img src="docs/windows-minimal.png" width="460" alt="Vitals in minimal mode on Windows">
 </p>
+<p align="center"><sub>Minimal mode, the default</sub></p>
+
+<p align="center">
+  <img src="docs/windows.png" width="280" alt="Vitals with graphs, narrow window">
+  <img src="docs/windows-wide.png" width="520" alt="Vitals with graphs, wide window">
+</p>
+<p align="center"><sub>Graphs, narrow and wide</sub></p>
 
 ## What it shows
 
@@ -82,7 +88,7 @@ cargo build --release
   <img src="docs/linux-wsl.png" width="300" alt="Vitals on Linux under WSL, dark theme">
   <img src="docs/macos-vm.png" width="300" alt="Vitals on a macOS VM, light theme">
 </p>
-<p align="center"><sub>Linux under WSL (left) and macOS in a GitHub VM (right). Both VMs have no real GPU or temperature sensors, hence the n/a values.</sub></p>
+<p align="center"><sub>Minimal mode on Linux under WSL (left, dark theme) and macOS in a GitHub VM (right, light theme). Neither VM has a real GPU or temperature sensors, hence the n/a values.</sub></p>
 
 ## License
 
