@@ -14,7 +14,7 @@
 | Block | What it shows |
 |---|---|
 | CPU | Usage and busiest core; the title shows the CPU name and current clock |
-| Memory | A bar: used against total, with the RAM type and speed. Amber from 80% used, red from 90% |
+| Memory | Used, against total, with the RAM type and speed in the title. Amber from 80% used, red from 90% |
 | GPU | Load, VRAM |
 | Network | Download, upload on physical adapters only, so VPN and virtual adapter traffic is not counted twice |
 | Disk activity | Share of time each physical disk is busy (Task Manager's "active time") |

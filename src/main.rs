@@ -17,7 +17,6 @@ use theme::Tokens;
 const HISTORY: usize = 120;
 const TICK: Duration = Duration::from_secs(1);
 const GAP: f32 = 10.0;
-const MEMORY_HEIGHT: f32 = 46.0;
 /// Minimal mode: one row per block, values only.
 const ROW_HEIGHT: f32 = 34.0;
 const ROW_GAP: f32 = 6.0;
@@ -144,39 +143,24 @@ impl eframe::App for App {
 
             // Minimal mode: every block as one row of values, no graphs.
             if self.minimal {
-                for (i, block) in view.iter().enumerate() {
+                for (i, chart) in view.iter().enumerate() {
                     let min = area.min + vec2(0.0, i as f32 * (ROW_HEIGHT + ROW_GAP));
                     let rect = Rect::from_min_size(min, vec2(area.width(), ROW_HEIGHT));
-                    header(&ui.painter_at(rect), rect, &block.chart, t);
+                    header(&ui.painter_at(rect), rect, chart, t);
                 }
                 return;
             }
 
-            // Graphs share rows: one per row when narrow, two when wide. The memory bar
-            // always takes a full-width row, and a graph left alone on a row stretches.
+            // One column when narrow, two when wide; a short last row stretches to full width.
             let cols = if area.width() >= 760.0 { 2 } else { 1 };
-            let mut rows: Vec<Vec<&Block>> = Vec::new();
-            for block in &view {
-                match rows.last_mut() {
-                    Some(row) if block.bar.is_none() && row[0].bar.is_none() && row.len() < cols => row.push(block),
-                    _ => rows.push(vec![block]),
-                }
-            }
-            let bars = rows.iter().filter(|r| r[0].bar.is_some()).count();
-            let free = area.height() - GAP * (rows.len() - 1) as f32 - bars as f32 * MEMORY_HEIGHT;
-            let h = free / (rows.len() - bars).max(1) as f32;
-            let mut y = area.top();
-            for row in rows {
-                let height = if row[0].bar.is_some() { MEMORY_HEIGHT } else { h };
-                let w = (area.width() - GAP * (row.len() - 1) as f32) / row.len() as f32;
-                for (i, block) in row.iter().enumerate() {
-                    let rect = Rect::from_min_size(pos2(area.left() + i as f32 * (w + GAP), y), vec2(w, height));
-                    match block.bar {
-                        Some((used, color)) => draw_bar(ui, rect, &block.chart, used, color, t),
-                        None => draw(ui, rect, &block.chart, t),
-                    }
-                }
-                y += height + GAP;
+            let rows = view.len().div_ceil(cols);
+            let h = (area.height() - GAP * (rows - 1) as f32) / rows as f32;
+            for (i, chart) in view.iter().enumerate() {
+                let (row, col) = (i / cols, i % cols);
+                let in_row = (view.len() - row * cols).min(cols);
+                let w = (area.width() - GAP * (in_row - 1) as f32) / in_row as f32;
+                let min = area.min + vec2(col as f32 * (w + GAP), row as f32 * (h + GAP));
+                draw(ui, Rect::from_min_size(min, vec2(w, h)), chart, t);
             }
         });
         if toggle {
@@ -202,23 +186,12 @@ struct Chart {
     series: Vec<Series>,
 }
 
-/// One block of the window, in display order.
-struct Block {
-    chart: Chart,
-    /// Memory is a slim bar instead of a graph: share used (0 to 1, NaN before
-    /// the first sample) and its colour (blue, amber from 80%, red from 90%).
-    bar: Option<(f32, Color32)>,
-}
-
-fn graph(chart: Chart) -> Block {
-    Block { chart, bar: None }
-}
-
 fn series(label: impl Into<String>, color: Color32, values: Vec<f32>, text: String) -> Series {
     Series { label: label.into(), color, values, text, text_color: None }
 }
 
-fn view(state: &State, t: &Tokens) -> Vec<Block> {
+/// The blocks in display order.
+fn view(state: &State, t: &Tokens) -> Vec<Chart> {
     let (info, s) = (&state.info, &state.samples);
     let last = s.back();
     let col = |f: &dyn Fn(&Sample) -> f32| s.iter().map(f).collect::<Vec<f32>>();
@@ -258,19 +231,20 @@ fn view(state: &State, t: &Tokens) -> Vec<Block> {
     let fan = last.map(|x| x.gpu.fan_rpm).filter(|v| v.is_finite()).map(|rpm| {
         if rpm < 1.0 { "GPU fan off".to_string() } else { format!("GPU fan {rpm:.0} rpm") }
     });
+    // RAM line and value turn amber from 80% used and red from 90%.
     let used = last.map_or(f64::NAN, |x| x.mem_used);
-    let memory_used = (used / mem_total) as f32;
-    let memory_tone = if memory_used >= 0.9 { Some(t.danger) } else if memory_used >= 0.8 { Some(t.warning) } else { None };
+    let share = used / mem_total;
+    let memory_tone = if share >= 0.9 { Some(t.danger) } else if share >= 0.8 { Some(t.warning) } else { None };
     let mut memory_series = series(
         "Used",
-        t.info,
-        Vec::new(),
+        memory_tone.unwrap_or(t.info),
+        col(&|x| (x.mem_used / mem_total * 100.0) as f32),
         if used.is_finite() { format!("{:.1} / {:.1} GB", used / GB, mem_total / GB) } else { "n/a".into() },
     );
     memory_series.text_color = memory_tone;
 
     vec![
-        graph(Chart {
+        Chart {
             title: if info.cpu_name.is_empty() { "CPU".into() } else { info.cpu_name.clone() },
             subtitle: ghz,
             max: 100.0,
@@ -279,18 +253,9 @@ fn view(state: &State, t: &Tokens) -> Vec<Block> {
                 series("Usage", t.info, col(&|x| x.cpu), pct(|x| x.cpu)),
                 series("Top core", t.warning, col(&|x| x.top_core), pct(|x| x.top_core)),
             ],
-        }),
-        Block {
-            chart: Chart {
-                title: "Memory".into(),
-                subtitle: info.mem_speed.clone(),
-                max: 100.0,
-                scale: None,
-                series: vec![memory_series],
-            },
-            bar: Some((memory_used, memory_tone.unwrap_or(t.info))),
         },
-        graph(Chart {
+        Chart { title: "Memory".into(), subtitle: info.mem_speed.clone(), max: 100.0, scale: None, series: vec![memory_series] },
+        Chart {
             title: info.gpu_name.clone(),
             subtitle: None,
             max: 100.0,
@@ -305,8 +270,8 @@ fn view(state: &State, t: &Tokens) -> Vec<Block> {
                         .map_or("n/a".into(), |x| format!("{:.1} / {:.0} GB", x.gpu.vram_used / GB, vram_total / GB)),
                 ),
             ],
-        }),
-        graph(Chart {
+        },
+        Chart {
             title: "Network".into(),
             subtitle: None,
             max: net_max as f32,
@@ -315,9 +280,9 @@ fn view(state: &State, t: &Tokens) -> Vec<Block> {
                 series("Down", t.info, col(&|x| x.net_down as f32), last.map_or("n/a".into(), |x| rate(x.net_down))),
                 series("Up", t.warning, col(&|x| x.net_up as f32), last.map_or("n/a".into(), |x| rate(x.net_up))),
             ],
-        }),
-        graph(Chart { title: "Disk activity".into(), subtitle: None, max: 100.0, scale: None, series: disks }),
-        graph(Chart { title: "Temperature".into(), subtitle: fan, max: 100.0, scale: Some("100°C".into()), series: temps }),
+        },
+        Chart { title: "Disk activity".into(), subtitle: None, max: 100.0, scale: None, series: disks },
+        Chart { title: "Temperature".into(), subtitle: fan, max: 100.0, scale: Some("100°C".into()), series: temps },
     ]
 }
 
@@ -330,7 +295,7 @@ fn rate(bytes: f64) -> String {
     format!("{v:.1} {}", ["B/s", "KB/s", "MB/s", "GB/s"][unit])
 }
 
-/// Card background, legend on the right and title on the left, shared by graphs and the memory bar.
+/// Card background, legend on the right and title on the left; the whole block in minimal mode.
 fn header(p: &Painter, rect: Rect, chart: &Chart, t: &Tokens) {
     p.rect(rect, CornerRadius::same(12), t.elevated, Stroke::new(1.0, t.border), StrokeKind::Inside);
 
@@ -352,17 +317,6 @@ fn header(p: &Painter, rect: Rect, chart: &Chart, t: &Tokens) {
     let end = title.text(rect.left_top() + vec2(12.0, 10.0), Align2::LEFT_TOP, &chart.title, FontId::proportional(14.0), t.fg);
     if let Some(subtitle) = &chart.subtitle {
         title.text(pos2(end.right() + 8.0, y), Align2::LEFT_TOP, subtitle, FontId::proportional(12.0), t.muted);
-    }
-}
-
-fn draw_bar(ui: &egui::Ui, rect: Rect, chart: &Chart, fraction: f32, color: Color32, t: &Tokens) {
-    let p = ui.painter_at(rect);
-    header(&p, rect, chart, t);
-    let bar = Rect::from_min_max(pos2(rect.left() + 12.0, rect.bottom() - 15.0), pos2(rect.right() - 12.0, rect.bottom() - 9.0));
-    p.rect_filled(bar, CornerRadius::same(3), t.border);
-    if fraction.is_finite() {
-        let filled = Rect::from_min_size(bar.min, vec2(bar.width() * fraction.clamp(0.0, 1.0), bar.height()));
-        p.rect_filled(filled, CornerRadius::same(3), color);
     }
 }
 
