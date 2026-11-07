@@ -23,7 +23,7 @@ fn main() -> eframe::Result {
     let icon = eframe::icon_data::from_png_bytes(theme::ICON).expect("bundled icon is a valid PNG");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([460.0, 740.0])
+            .with_inner_size([460.0, 860.0])
             .with_min_inner_size([320.0, 420.0])
             .with_icon(Arc::new(icon)),
         ..Default::default()
@@ -106,7 +106,7 @@ impl eframe::App for App {
 }
 
 struct Series {
-    label: &'static str,
+    label: String,
     color: Color32,
     values: Vec<f32>,
     text: String,
@@ -120,8 +120,8 @@ struct Chart {
     series: Vec<Series>,
 }
 
-fn series(label: &'static str, color: Color32, values: Vec<f32>, text: String) -> Series {
-    Series { label, color, values, text, text_color: None }
+fn series(label: impl Into<String>, color: Color32, values: Vec<f32>, text: String) -> Series {
+    Series { label: label.into(), color, values, text, text_color: None }
 }
 
 fn charts(state: &State, t: &Tokens) -> Vec<Chart> {
@@ -134,7 +134,7 @@ fn charts(state: &State, t: &Tokens) -> Vec<Chart> {
     let vram_total = info.vram_total;
     let net_max = s.iter().map(|x| x.net_down.max(x.net_up)).fold(64.0 * 1024.0, f64::max) * 1.15;
 
-    let temp = |label, color, f: fn(&Sample) -> f32| {
+    let temp = |label: &str, color, f: fn(&Sample) -> f32| {
         let v = last.map(f).unwrap_or(f32::NAN);
         let mut series = series(label, color, col(&|x| f(x)), if v.is_finite() { format!("{v:.0}°C") } else { "n/a".into() });
         series.text_color = if v >= 85.0 { Some(t.danger) } else if v >= 70.0 { Some(t.warning) } else { None };
@@ -144,6 +144,19 @@ fn charts(state: &State, t: &Tokens) -> Vec<Chart> {
     if info.has_igpu {
         temps.push(temp("iGPU", t.muted, |x| x.gpu.igpu_temp));
     }
+
+    let palette = [t.info, t.warning, t.success, t.muted, t.danger];
+    let disks = info
+        .disk_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let at = move |x: &Sample| x.disks.get(i).copied().unwrap_or(f32::NAN);
+            let v = last.map_or(f32::NAN, at);
+            let text = if v.is_finite() { format!("{v:.0}%") } else { "n/a".into() };
+            series(name.as_str(), palette[i % palette.len()], col(&at), text)
+        })
+        .collect();
 
     vec![
         Chart {
@@ -166,6 +179,7 @@ fn charts(state: &State, t: &Tokens) -> Vec<Chart> {
                 last.map_or("n/a".into(), |x| format!("{:.1} / {:.1} GB", x.mem_used / GB, mem_total / GB)),
             )],
         },
+        Chart { title: "Disks".into(), max: 100.0, scale: None, series: disks },
         Chart {
             title: "Network".into(),
             max: net_max as f32,
@@ -216,7 +230,7 @@ fn draw(ui: &egui::Ui, rect: Rect, chart: &Chart, t: &Tokens) {
             x = p.text(pos2(x, y), Align2::RIGHT_TOP, "|", FontId::proportional(12.0), t.muted).left() - 10.0;
         }
         let value = p.text(pos2(x, y), Align2::RIGHT_TOP, &s.text, FontId::monospace(12.0), s.text_color.unwrap_or(t.fg));
-        let label = p.text(pos2(value.left() - 5.0, y), Align2::RIGHT_TOP, s.label, FontId::proportional(12.0), t.muted);
+        let label = p.text(pos2(value.left() - 5.0, y), Align2::RIGHT_TOP, &s.label, FontId::proportional(12.0), t.muted);
         p.circle_filled(pos2(label.left() - 7.0, label.center().y), 3.5, s.color);
         x = label.left() - 21.0;
     }

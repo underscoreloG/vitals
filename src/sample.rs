@@ -14,7 +14,7 @@ pub struct Gpu {
     pub igpu_temp: f32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Sample {
     pub cpu: f32,
     pub top_core: f32,
@@ -23,6 +23,8 @@ pub struct Sample {
     pub net_down: f64,
     pub net_up: f64,
     pub gpu: Gpu,
+    /// Active time % per disk, in the order of `Info::disk_names`.
+    pub disks: Vec<f32>,
 }
 
 #[derive(Clone, Default)]
@@ -31,6 +33,7 @@ pub struct Info {
     pub gpu_name: String,
     pub vram_total: f64,
     pub has_igpu: bool,
+    pub disk_names: Vec<String>,
 }
 
 pub struct Sampler {
@@ -54,6 +57,7 @@ impl Sampler {
             gpu_name: platform.gpu_name.clone(),
             vram_total: platform.vram_total,
             has_igpu: platform.has_igpu,
+            disk_names: platform.disk_names.clone(),
         };
         Self {
             info,
@@ -84,6 +88,7 @@ impl Sampler {
             net_down: down as f64 / secs,
             net_up: up as f64 / secs,
             gpu: self.platform.gpu(),
+            disks: self.platform.disks(),
         }
     }
 

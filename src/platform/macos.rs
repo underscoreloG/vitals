@@ -1,14 +1,16 @@
 //! macOS: network from sysinfo, counting only en* interfaces (Wi-Fi and Ethernet,
 //! so utun VPN tunnels and bridges are skipped). GPU load and memory from the
-//! IOAccelerator PerformanceStatistics in IOKit. macOS has no public GPU
-//! temperature, so that line shows n/a. No root needed.
+//! IOAccelerator PerformanceStatistics, disk activity from IOBlockStorageDriver
+//! Statistics, both in IOKit. macOS has no public GPU temperature, so that line
+//! shows n/a. No root needed.
 
 use crate::sample::Gpu;
 use core_foundation::base::{CFType, CFTypeRef, TCFType, kCFAllocatorDefault};
 use core_foundation::dictionary::{CFDictionary, CFDictionaryRef, CFMutableDictionaryRef};
 use core_foundation::number::CFNumber;
 use core_foundation::string::{CFString, CFStringRef};
-use std::ffi::{c_char, c_void};
+use std::ffi::{CStr, c_char, c_void};
+use std::time::Instant;
 use sysinfo::{Networks, System};
 
 #[link(name = "IOKit", kind = "framework")]
@@ -24,6 +26,9 @@ pub struct Platform {
     pub gpu_name: String,
     pub vram_total: f64,
     pub has_igpu: bool,
+    pub disk_names: Vec<String>,
+    disk_prev: Vec<f64>,
+    disk_at: Instant,
     networks: Option<Networks>,
 }
 
@@ -35,10 +40,14 @@ impl Platform {
             s.total_memory() as f64
         });
         let model = accelerator().and_then(|a| a.model);
+        let disk_prev = disk_busy_ns();
         Self {
             gpu_name: model.unwrap_or_else(|| "GPU".into()),
             vram_total: ram,
             has_igpu: false,
+            disk_names: (1..=disk_prev.len()).map(|i| format!("Disk {i}")).collect(),
+            disk_prev,
+            disk_at: Instant::now(),
             networks: Networks::new_with_refreshed_list().ok(),
         }
     }
@@ -61,6 +70,25 @@ impl Platform {
             igpu_temp: f32::NAN,
         }
     }
+
+    /// Share of the last interval each disk spent reading or writing, capped at 100%.
+    /// Disks attached after launch are ignored.
+    pub fn disks(&mut self) -> Vec<f32> {
+        let ns = self.disk_at.elapsed().as_secs_f64() * 1e9;
+        self.disk_at = Instant::now();
+        let now = disk_busy_ns();
+        let mut out = Vec::with_capacity(self.disk_prev.len());
+        for (i, prev) in self.disk_prev.iter_mut().enumerate() {
+            match now.get(i) {
+                Some(&busy) => {
+                    out.push(((busy - *prev) / ns.max(1.0) * 100.0).clamp(0.0, 100.0) as f32);
+                    *prev = busy;
+                }
+                None => out.push(f32::NAN),
+            }
+        }
+        out
+    }
 }
 
 struct Accelerator {
@@ -71,39 +99,51 @@ struct Accelerator {
 
 /// The first IOAccelerator that publishes PerformanceStatistics.
 fn accelerator() -> Option<Accelerator> {
+    let mut found = None;
+    each_service(c"IOAccelerator", |entry| {
+        if found.is_some() {
+            return;
+        }
+        if let Some(stats) = dictionary(entry, "PerformanceStatistics") {
+            found = Some(Accelerator {
+                load: number(&stats, "Device Utilization %").map_or(f32::NAN, |v| v as f32),
+                memory: number(&stats, "In use system memory").unwrap_or(f64::NAN),
+                model: property(entry, "model").and_then(|v| v.downcast_into::<CFString>()).map(|s| s.to_string()),
+            });
+        }
+    });
+    found
+}
+
+/// Total nanoseconds each block storage driver has spent reading plus writing.
+fn disk_busy_ns() -> Vec<f64> {
+    let mut out = Vec::new();
+    each_service(c"IOBlockStorageDriver", |entry| {
+        if let Some(stats) = dictionary(entry, "Statistics") {
+            let read = number(&stats, "Total Time (Read)").unwrap_or(0.0);
+            out.push(read + number(&stats, "Total Time (Write)").unwrap_or(0.0));
+        }
+    });
+    out
+}
+
+/// Calls `f` with every registered service of an IOKit class, then releases it.
+fn each_service(class: &CStr, mut f: impl FnMut(u32)) {
     let mut iterator = 0;
-    let matching = unsafe { IOServiceMatching(c"IOAccelerator".as_ptr()) };
+    let matching = unsafe { IOServiceMatching(class.as_ptr()) };
     // IOServiceGetMatchingServices takes ownership of `matching`.
     if unsafe { IOServiceGetMatchingServices(0, matching as CFDictionaryRef, &mut iterator) } != 0 {
-        return None;
+        return;
     }
-    let mut found = None;
     loop {
         let entry = unsafe { IOIteratorNext(iterator) };
         if entry == 0 {
             break;
         }
-        if found.is_none() {
-            if let Some(stats) = property(entry, "PerformanceStatistics").and_then(|v| v.downcast_into::<CFDictionary>()) {
-                let number = |key: &str| {
-                    let key = CFString::new(key);
-                    stats
-                        .find(key.as_concrete_TypeRef() as *const c_void)
-                        .map(|v| unsafe { CFType::wrap_under_get_rule(*v as CFTypeRef) })
-                        .and_then(|v| v.downcast_into::<CFNumber>())
-                        .and_then(|n| n.to_f64())
-                };
-                found = Some(Accelerator {
-                    load: number("Device Utilization %").map_or(f32::NAN, |v| v as f32),
-                    memory: number("In use system memory").unwrap_or(f64::NAN),
-                    model: property(entry, "model").and_then(|v| v.downcast_into::<CFString>()).map(|s| s.to_string()),
-                });
-            }
-        }
+        f(entry);
         unsafe { IOObjectRelease(entry) };
     }
     unsafe { IOObjectRelease(iterator) };
-    found
 }
 
 /// One registry property as an owned CF object. Callers check its type with downcast.
@@ -111,4 +151,16 @@ fn property(entry: u32, key: &str) -> Option<CFType> {
     let key = CFString::new(key);
     let value = unsafe { IORegistryEntryCreateCFProperty(entry, key.as_concrete_TypeRef(), kCFAllocatorDefault as *const c_void, 0) };
     (!value.is_null()).then(|| unsafe { CFType::wrap_under_create_rule(value) })
+}
+
+fn dictionary(entry: u32, key: &str) -> Option<CFDictionary> {
+    property(entry, key).and_then(|v| v.downcast_into::<CFDictionary>())
+}
+
+fn number(dict: &CFDictionary, key: &str) -> Option<f64> {
+    let key = CFString::new(key);
+    dict.find(key.as_concrete_TypeRef() as *const c_void)
+        .map(|v| unsafe { CFType::wrap_under_get_rule(*v as CFTypeRef) })
+        .and_then(|v| v.downcast_into::<CFNumber>())
+        .and_then(|n| n.to_f64())
 }

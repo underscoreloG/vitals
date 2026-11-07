@@ -1,11 +1,13 @@
 //! Linux: network from sysinfo, counting only physical NICs (those with a
 //! /sys/class/net/<if>/device link, so VPN, bridges and containers are skipped).
 //! GPU from amdgpu sysfs; other drivers report no load, VRAM or temperature there,
-//! so those show n/a. No root needed.
+//! so those show n/a. Disk activity from /proc/diskstats. No root needed.
 
 use crate::sample::Gpu;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use sysinfo::Networks;
 
 struct Card {
@@ -19,6 +21,9 @@ pub struct Platform {
     pub gpu_name: String,
     pub vram_total: f64,
     pub has_igpu: bool,
+    pub disk_names: Vec<String>,
+    disk_prev: Vec<f64>,
+    disk_at: Instant,
     networks: Option<Networks>,
     dgpu: Option<Card>,
     igpu: Option<Card>,
@@ -30,14 +35,41 @@ impl Platform {
         cards.sort_by(|a, b| b.vram.total_cmp(&a.vram));
         let mut cards = cards.into_iter();
         let (dgpu, igpu) = (cards.next(), cards.next());
+
+        // Whole physical disks only: loop, dm, md and zram devices have no `device` link.
+        let ticks = io_ticks();
+        let mut disk_names: Vec<String> =
+            ticks.keys().filter(|n| Path::new("/sys/block").join(n).join("device").exists()).cloned().collect();
+        disk_names.sort();
         Self {
             gpu_name: dgpu.as_ref().map_or("GPU".into(), |c| c.name.clone()),
             vram_total: dgpu.as_ref().map_or(0.0, |c| c.vram),
             has_igpu: igpu.as_ref().is_some_and(|c| c.temp.is_some()),
+            disk_prev: disk_names.iter().map(|n| ticks[n]).collect(),
+            disk_names,
+            disk_at: Instant::now(),
             networks: Networks::new_with_refreshed_list().ok(),
             dgpu,
             igpu,
         }
+    }
+
+    /// Share of the last interval each disk spent doing I/O, like iostat's %util.
+    pub fn disks(&mut self) -> Vec<f32> {
+        let ms = self.disk_at.elapsed().as_secs_f64() * 1000.0;
+        self.disk_at = Instant::now();
+        let ticks = io_ticks();
+        let mut out = Vec::with_capacity(self.disk_names.len());
+        for (name, prev) in self.disk_names.iter().zip(self.disk_prev.iter_mut()) {
+            match ticks.get(name) {
+                Some(&now) => {
+                    out.push(((now - *prev) / ms.max(1.0) * 100.0).clamp(0.0, 100.0) as f32);
+                    *prev = now;
+                }
+                None => out.push(f32::NAN),
+            }
+        }
+        out
     }
 
     pub fn net_totals(&mut self) -> (u64, u64) {
@@ -58,6 +90,18 @@ impl Platform {
             igpu_temp: temperature(self.igpu.as_ref()),
         }
     }
+}
+
+/// Milliseconds each block device has spent doing I/O (field 13 of /proc/diskstats).
+fn io_ticks() -> HashMap<String, f64> {
+    let stats = fs::read_to_string("/proc/diskstats").unwrap_or_default();
+    stats
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            Some((f.get(2)?.to_string(), f.get(12)?.parse().ok()?))
+        })
+        .collect()
 }
 
 fn read(path: &Path) -> Option<f64> {

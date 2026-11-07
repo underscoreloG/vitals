@@ -1,5 +1,6 @@
-//! Windows: network from the interface table, GPU load and VRAM from PDH, GPU
-//! temperatures from D3DKMT (the same source Task Manager uses). No driver needed.
+//! Windows: network from the interface table, GPU load, VRAM and disk activity
+//! from PDH, GPU temperatures from D3DKMT (the same source Task Manager uses).
+//! No driver needed.
 
 use crate::sample::Gpu;
 use std::collections::HashMap;
@@ -30,6 +31,10 @@ pub struct Platform {
     pub gpu_name: String,
     pub vram_total: f64,
     pub has_igpu: bool,
+    pub disk_names: Vec<String>,
+    disk_keys: Vec<String>,
+    disk_query: PDH_HQUERY,
+    disk_idle: PDH_HCOUNTER,
     query: PDH_HQUERY,
     engines: PDH_HCOUNTER,
     vram: PDH_HCOUNTER,
@@ -52,10 +57,27 @@ impl Platform {
             PdhCollectQueryData(query);
         }
 
+        // A rate counter lists its instances only after two collections.
+        let (mut disk_query, mut disk_idle) = Default::default();
+        unsafe {
+            PdhOpenQueryW(PCWSTR::null(), 0, &mut disk_query);
+            PdhAddEnglishCounterW(disk_query, w!("\\PhysicalDisk(*)\\% Idle Time"), 0, &mut disk_idle);
+            PdhCollectQueryData(disk_query);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            PdhCollectQueryData(disk_query);
+        }
+        let mut disk_keys: Vec<String> =
+            counter_items(disk_idle).into_iter().map(|(name, _)| name).filter(|n| n != "_total").collect();
+        disk_keys.sort_by_key(|k| disk_label(k));
+
         Self {
             gpu_name: dgpu.as_ref().map_or("GPU".into(), |g| g.name.clone()),
             vram_total: dgpu.as_ref().map_or(0.0, |g| g.vram),
             has_igpu: igpu.is_some(),
+            disk_names: disk_keys.iter().map(|k| disk_label(k)).collect(),
+            disk_keys,
+            disk_query,
+            disk_idle,
             query,
             engines,
             vram,
@@ -102,6 +124,21 @@ impl Platform {
             vram_used = counter_items(self.vram).iter().filter(|(n, _)| n.contains(&gpu.tag)).map(|(_, v)| v).sum();
         }
         Gpu { load, vram_used, temp: temperature(&self.dgpu), igpu_temp: temperature(&self.igpu) }
+    }
+
+    /// Active time per physical disk, in the order of `disk_names`, like Task Manager.
+    pub fn disks(&mut self) -> Vec<f32> {
+        unsafe { PdhCollectQueryData(self.disk_query) };
+        let idle: HashMap<String, f64> = counter_items(self.disk_idle).into_iter().collect();
+        self.disk_keys.iter().map(|k| idle.get(k).map_or(f32::NAN, |v| (100.0 - v).clamp(0.0, 100.0) as f32)).collect()
+    }
+}
+
+/// PDH instance to label: "3 c: g:" becomes "C: G:", a disk without a letter "Disk 4".
+fn disk_label(instance: &str) -> String {
+    match instance.split_once(' ') {
+        Some((_, letters)) => letters.to_ascii_uppercase(),
+        None => format!("Disk {instance}"),
     }
 }
 

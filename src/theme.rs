@@ -15,6 +15,7 @@ pub struct Tokens {
     pub muted: Color32,
     pub border: Color32,
     pub info: Color32,
+    pub success: Color32,
     pub warning: Color32,
     pub danger: Color32,
 }
@@ -26,6 +27,7 @@ const DARK: Tokens = Tokens {
     muted: Color32::from_rgb(0x9A, 0x9A, 0xA8),
     border: Color32::from_rgb(0x23, 0x23, 0x2C),
     info: Color32::from_rgb(0x60, 0xA5, 0xFA),
+    success: Color32::from_rgb(0x4A, 0xDE, 0x80),
     warning: Color32::from_rgb(0xFB, 0xBF, 0x24),
     danger: Color32::from_rgb(0xFF, 0x8A, 0x8A),
 };
@@ -37,6 +39,7 @@ const LIGHT: Tokens = Tokens {
     muted: Color32::from_rgb(0x5C, 0x5C, 0x6B),
     border: Color32::from_rgb(0xDC, 0xDC, 0xE3),
     info: Color32::from_rgb(0x1D, 0x4E, 0xD8),
+    success: Color32::from_rgb(0x15, 0x80, 0x3D),
     warning: Color32::from_rgb(0xB4, 0x53, 0x09),
     danger: Color32::from_rgb(0xC1, 0x00, 0x1B),
 };
