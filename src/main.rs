@@ -7,7 +7,7 @@ mod theme;
 #[cfg_attr(target_os = "macos", path = "platform/macos.rs")]
 mod platform;
 
-use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Rect, RichText, Shape, Stroke, StrokeKind, pos2, vec2};
+use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Painter, Rect, RichText, Shape, Stroke, StrokeKind, pos2, vec2};
 use sample::{Info, Sample, Sampler};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -17,6 +17,7 @@ use theme::Tokens;
 const HISTORY: usize = 120;
 const TICK: Duration = Duration::from_secs(1);
 const GAP: f32 = 10.0;
+const MEMORY_HEIGHT: f32 = 46.0;
 const GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 fn main() -> eframe::Result {
@@ -26,6 +27,8 @@ fn main() -> eframe::Result {
             .with_inner_size([460.0, 860.0])
             .with_min_inner_size([320.0, 420.0])
             .with_icon(Arc::new(icon)),
+        // Reopens with the last window size and position.
+        persist_window: true,
         ..Default::default()
     };
     eframe::run_native("Vitals", options, Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx)))))
@@ -74,7 +77,7 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let t = theme::tokens(ui.visuals().dark_mode);
-        let charts = charts(&self.state.lock().unwrap(), t);
+        let view = view(&self.state.lock().unwrap(), t);
 
         let frame = egui::Frame::new().fill(t.bg).inner_margin(12);
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
@@ -90,8 +93,14 @@ impl eframe::App for App {
             });
             ui.add_space(8.0);
 
-            // One column when narrow, two when wide; a short last row stretches to full width.
+            // Memory changes slowly, so it is a slim full-width bar instead of a graph.
             let area = ui.available_rect_before_wrap();
+            let memory = Rect::from_min_size(area.min, vec2(area.width(), MEMORY_HEIGHT));
+            draw_bar(ui, memory, &view.memory, view.memory_used, t);
+            let area = Rect::from_min_max(pos2(area.left(), memory.bottom() + GAP), area.max);
+
+            // One column when narrow, two when wide; a short last row stretches to full width.
+            let charts = &view.charts;
             let cols = if area.width() >= 760.0 { 2 } else { 1 };
             let rows = charts.len().div_ceil(cols);
             let h = (area.height() - GAP * (rows - 1) as f32) / rows as f32;
@@ -116,18 +125,25 @@ struct Series {
 
 struct Chart {
     title: String,
-    /// Shown muted after the title, such as the RAM speed.
+    /// Shown muted after the title, such as the RAM speed or the CPU clock.
     subtitle: Option<String>,
     max: f32,
     scale: Option<String>,
     series: Vec<Series>,
 }
 
+struct View {
+    memory: Chart,
+    /// Share of RAM in use, 0 to 1 (NaN before the first sample).
+    memory_used: f32,
+    charts: Vec<Chart>,
+}
+
 fn series(label: impl Into<String>, color: Color32, values: Vec<f32>, text: String) -> Series {
     Series { label: label.into(), color, values, text, text_color: None }
 }
 
-fn charts(state: &State, t: &Tokens) -> Vec<Chart> {
+fn view(state: &State, t: &Tokens) -> View {
     let (info, s) = (&state.info, &state.samples);
     let last = s.back();
     let col = |f: &dyn Fn(&Sample) -> f32| s.iter().map(f).collect::<Vec<f32>>();
@@ -137,19 +153,18 @@ fn charts(state: &State, t: &Tokens) -> Vec<Chart> {
     let vram_total = info.vram_total;
     let net_max = s.iter().map(|x| x.net_down.max(x.net_up)).fold(64.0 * 1024.0, f64::max) * 1.15;
 
-    let temp = |label: &str, color, f: fn(&Sample) -> f32, missing: &str| {
+    // Amber and red thresholds per sensor: a Ryzen 7000 runs at 95 °C by design.
+    let temp = |label: &str, color, f: fn(&Sample) -> f32, missing: &str, warn: f32, hot: f32| {
         let v = last.map(f).unwrap_or(f32::NAN);
         let mut series = series(label, color, col(&|x| f(x)), if v.is_finite() { format!("{v:.0}°C") } else { missing.into() });
-        series.text_color = if v >= 85.0 { Some(t.danger) } else if v >= 70.0 { Some(t.warning) } else { None };
+        series.text_color = if v >= hot { Some(t.danger) } else if v >= warn { Some(t.warning) } else { None };
         series
     };
-    let mut temps = vec![
-        temp("CPU", t.info, |x| x.cpu_temp, if info.cpu_temp_hint.is_empty() { "n/a" } else { info.cpu_temp_hint }),
-        temp("GPU", t.warning, |x| x.gpu.temp, "n/a"),
+    let cpu_hint = if info.cpu_temp_hint.is_empty() { "n/a" } else { info.cpu_temp_hint };
+    let temps = vec![
+        temp("CPU", t.info, |x| x.cpu_temp, cpu_hint, 90.0, 95.0),
+        temp("GPU", t.warning, |x| x.gpu.temp, "n/a", 80.0, 90.0),
     ];
-    if info.has_igpu {
-        temps.push(temp("iGPU", t.muted, |x| x.gpu.igpu_temp, "n/a"));
-    }
 
     let palette = [t.info, t.warning, t.success, t.muted, t.danger];
     let disks = info
@@ -164,18 +179,14 @@ fn charts(state: &State, t: &Tokens) -> Vec<Chart> {
         })
         .collect();
 
-    vec![
-        Chart {
-            title: if info.cpu_name.is_empty() { "CPU".into() } else { info.cpu_name.clone() },
-            subtitle: None,
-            max: 100.0,
-            scale: None,
-            series: vec![
-                series("Usage", t.info, col(&|x| x.cpu), pct(|x| x.cpu)),
-                series("Top core", t.warning, col(&|x| x.top_core), pct(|x| x.top_core)),
-            ],
-        },
-        Chart {
+    let ghz = last.map(|x| x.cpu_ghz).filter(|v| v.is_finite() && *v > 0.0).map(|v| format!("{v:.2} GHz"));
+    let fan = last.map(|x| x.gpu.fan_rpm).filter(|v| v.is_finite()).map(|rpm| {
+        if rpm < 1.0 { "GPU fan off".to_string() } else { format!("GPU fan {rpm:.0} rpm") }
+    });
+    let used = last.map_or(f64::NAN, |x| x.mem_used);
+
+    View {
+        memory: Chart {
             title: "Memory".into(),
             subtitle: info.mem_speed.clone(),
             max: 100.0,
@@ -183,39 +194,52 @@ fn charts(state: &State, t: &Tokens) -> Vec<Chart> {
             series: vec![series(
                 "Used",
                 t.info,
-                col(&|x| (x.mem_used / mem_total * 100.0) as f32),
-                last.map_or("n/a".into(), |x| format!("{:.1} / {:.1} GB", x.mem_used / GB, mem_total / GB)),
+                Vec::new(),
+                if used.is_finite() { format!("{:.1} / {:.1} GB", used / GB, mem_total / GB) } else { "n/a".into() },
             )],
         },
-        Chart { title: "Disk activity".into(), subtitle: None, max: 100.0, scale: None, series: disks },
-        Chart {
-            title: "Network".into(),
-            subtitle: None,
-            max: net_max as f32,
-            scale: Some(rate(net_max)),
-            series: vec![
-                series("Down", t.info, col(&|x| x.net_down as f32), last.map_or("n/a".into(), |x| rate(x.net_down))),
-                series("Up", t.warning, col(&|x| x.net_up as f32), last.map_or("n/a".into(), |x| rate(x.net_up))),
-            ],
-        },
-        Chart {
-            title: info.gpu_name.clone(),
-            subtitle: None,
-            max: 100.0,
-            scale: None,
-            series: vec![
-                series("Load", t.info, col(&|x| x.gpu.load), pct(|x| x.gpu.load)),
-                series(
-                    "VRAM",
-                    t.warning,
-                    col(&|x| (x.gpu.vram_used / vram_total * 100.0) as f32),
-                    last.filter(|x| x.gpu.vram_used.is_finite() && vram_total > 0.0)
-                        .map_or("n/a".into(), |x| format!("{:.1} / {:.0} GB", x.gpu.vram_used / GB, vram_total / GB)),
-                ),
-            ],
-        },
-        Chart { title: "Temperature".into(), subtitle: None, max: 100.0, scale: Some("100°C".into()), series: temps },
-    ]
+        memory_used: (used / mem_total) as f32,
+        charts: vec![
+            Chart {
+                title: if info.cpu_name.is_empty() { "CPU".into() } else { info.cpu_name.clone() },
+                subtitle: ghz,
+                max: 100.0,
+                scale: None,
+                series: vec![
+                    series("Usage", t.info, col(&|x| x.cpu), pct(|x| x.cpu)),
+                    series("Top core", t.warning, col(&|x| x.top_core), pct(|x| x.top_core)),
+                ],
+            },
+            Chart { title: "Disk activity".into(), subtitle: None, max: 100.0, scale: None, series: disks },
+            Chart {
+                title: "Network".into(),
+                subtitle: None,
+                max: net_max as f32,
+                scale: Some(rate(net_max)),
+                series: vec![
+                    series("Down", t.info, col(&|x| x.net_down as f32), last.map_or("n/a".into(), |x| rate(x.net_down))),
+                    series("Up", t.warning, col(&|x| x.net_up as f32), last.map_or("n/a".into(), |x| rate(x.net_up))),
+                ],
+            },
+            Chart {
+                title: info.gpu_name.clone(),
+                subtitle: None,
+                max: 100.0,
+                scale: None,
+                series: vec![
+                    series("Load", t.info, col(&|x| x.gpu.load), pct(|x| x.gpu.load)),
+                    series(
+                        "VRAM",
+                        t.warning,
+                        col(&|x| (x.gpu.vram_used / vram_total * 100.0) as f32),
+                        last.filter(|x| x.gpu.vram_used.is_finite() && vram_total > 0.0)
+                            .map_or("n/a".into(), |x| format!("{:.1} / {:.0} GB", x.gpu.vram_used / GB, vram_total / GB)),
+                    ),
+                ],
+            },
+            Chart { title: "Temperature".into(), subtitle: fan, max: 100.0, scale: Some("100°C".into()), series: temps },
+        ],
+    }
 }
 
 fn rate(bytes: f64) -> String {
@@ -227,8 +251,8 @@ fn rate(bytes: f64) -> String {
     format!("{v:.1} {}", ["B/s", "KB/s", "MB/s", "GB/s"][unit])
 }
 
-fn draw(ui: &egui::Ui, rect: Rect, chart: &Chart, t: &Tokens) {
-    let p = ui.painter_at(rect);
+/// Card background, legend on the right and title on the left, shared by graphs and the memory bar.
+fn header(p: &Painter, rect: Rect, chart: &Chart, t: &Tokens) {
     p.rect(rect, CornerRadius::same(12), t.elevated, Stroke::new(1.0, t.border), StrokeKind::Inside);
 
     // Legend, right-aligned: dot, label, current value, with a | between items.
@@ -250,14 +274,27 @@ fn draw(ui: &egui::Ui, rect: Rect, chart: &Chart, t: &Tokens) {
     if let Some(subtitle) = &chart.subtitle {
         title.text(pos2(end.right() + 8.0, y), Align2::LEFT_TOP, subtitle, FontId::proportional(12.0), t.muted);
     }
+}
+
+fn draw_bar(ui: &egui::Ui, rect: Rect, chart: &Chart, fraction: f32, t: &Tokens) {
+    let p = ui.painter_at(rect);
+    header(&p, rect, chart, t);
+    let bar = Rect::from_min_max(pos2(rect.left() + 12.0, rect.bottom() - 15.0), pos2(rect.right() - 12.0, rect.bottom() - 9.0));
+    p.rect_filled(bar, CornerRadius::same(3), t.border);
+    if fraction.is_finite() {
+        let filled = Rect::from_min_size(bar.min, vec2(bar.width() * fraction.clamp(0.0, 1.0), bar.height()));
+        p.rect_filled(filled, CornerRadius::same(3), t.info);
+    }
+}
+
+fn draw(ui: &egui::Ui, rect: Rect, chart: &Chart, t: &Tokens) {
+    let p = ui.painter_at(rect);
+    header(&p, rect, chart, t);
 
     let plot = Rect::from_min_max(rect.left_top() + vec2(12.0, 34.0), rect.right_bottom() - vec2(12.0, 12.0));
     for i in 0..=4 {
         let y = plot.bottom() - plot.height() * i as f32 / 4.0;
         p.hline(plot.x_range(), y, Stroke::new(1.0, t.border));
-    }
-    if let Some(scale) = &chart.scale {
-        p.text(plot.left_top() + vec2(4.0, 2.0), Align2::LEFT_TOP, scale, FontId::proportional(11.0), t.muted);
     }
 
     // Newest sample on the right edge; NaN breaks the line.
@@ -274,6 +311,14 @@ fn draw(ui: &egui::Ui, rect: Rect, chart: &Chart, t: &Tokens) {
             }
         }
         flush(&p, &mut line, s.color);
+    }
+
+    // Scale label last, on its own background, so lines near the top never hide it.
+    if let Some(scale) = &chart.scale {
+        let galley = p.layout_no_wrap(scale.clone(), FontId::proportional(11.0), t.muted);
+        let pos = plot.left_top() + vec2(4.0, 3.0);
+        p.rect_filled(Rect::from_min_size(pos, galley.size()).expand(2.0), CornerRadius::same(3), t.elevated);
+        p.galley(pos, galley, t.muted);
     }
 }
 

@@ -25,7 +25,6 @@ unsafe extern "C" {
 pub struct Platform {
     pub gpu_name: String,
     pub vram_total: f64,
-    pub has_igpu: bool,
     pub cpu_temp_hint: &'static str,
     /// Apple silicon does not report a RAM speed.
     pub mem_speed: Option<String>,
@@ -47,7 +46,6 @@ impl Platform {
         Self {
             gpu_name: model.unwrap_or_else(|| "GPU".into()),
             vram_total: ram,
-            has_igpu: false,
             cpu_temp_hint: "n/a",
             mem_speed: None,
             disk_names: (1..=disk_prev.len()).map(|i| format!("Disk {i}")).collect(),
@@ -72,7 +70,7 @@ impl Platform {
             load: a.as_ref().map_or(f32::NAN, |a| a.load),
             vram_used: a.as_ref().map_or(f64::NAN, |a| a.memory),
             temp: f32::NAN,
-            igpu_temp: f32::NAN,
+            fan_rpm: f32::NAN,
         }
     }
 

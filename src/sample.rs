@@ -1,5 +1,5 @@
-//! One reading per tick. CPU, memory and (outside Windows) CPU temperature come
-//! from sysinfo; network and GPU come from the platform module.
+//! One reading per tick. CPU, memory and (outside Windows) CPU clock and
+//! temperature come from sysinfo; network, disks and GPU come from the platform module.
 
 use crate::platform::Platform;
 use std::time::Instant;
@@ -11,13 +11,15 @@ pub struct Gpu {
     pub load: f32,
     pub vram_used: f64,
     pub temp: f32,
-    pub igpu_temp: f32,
+    /// 0 means the fan is stopped; NaN means the driver does not report it.
+    pub fan_rpm: f32,
 }
 
 #[derive(Clone)]
 pub struct Sample {
     pub cpu: f32,
     pub top_core: f32,
+    pub cpu_ghz: f32,
     pub cpu_temp: f32,
     pub mem_used: f64,
     pub net_down: f64,
@@ -34,9 +36,8 @@ pub struct Info {
     pub mem_speed: Option<String>,
     pub gpu_name: String,
     pub vram_total: f64,
-    pub has_igpu: bool,
     pub disk_names: Vec<String>,
-    /// Legend text while there is no CPU temperature, such as "needs admin".
+    /// Legend text while there is no CPU temperature, such as "run as admin".
     pub cpu_temp_hint: &'static str,
 }
 
@@ -62,7 +63,6 @@ impl Sampler {
             mem_speed: platform.mem_speed.clone(),
             gpu_name: platform.gpu_name.clone(),
             vram_total: platform.vram_total,
-            has_igpu: platform.has_igpu,
             disk_names: platform.disk_names.clone(),
             cpu_temp_hint: platform.cpu_temp_hint,
         };
@@ -90,6 +90,7 @@ impl Sampler {
         Sample {
             cpu: self.sys.global_cpu_usage(),
             top_core: self.sys.cpus().iter().map(|c| c.usage()).fold(0.0, f32::max),
+            cpu_ghz: self.cpu_ghz(),
             cpu_temp: self.cpu_temp(),
             mem_used: self.sys.used_memory() as f64,
             net_down: down as f64 / secs,
@@ -99,6 +100,20 @@ impl Sampler {
         }
     }
 
+    /// Windows reports a stale clock through the API sysinfo uses; the platform
+    /// reads the same counters as Task Manager instead.
+    #[cfg(windows)]
+    fn cpu_ghz(&mut self) -> f32 {
+        self.platform.cpu_ghz()
+    }
+
+    /// Average current clock across cores.
+    #[cfg(not(windows))]
+    fn cpu_ghz(&mut self) -> f32 {
+        self.sys.refresh_cpu_frequency();
+        let mhz: Vec<f32> = self.sys.cpus().iter().map(|c| c.frequency() as f32).filter(|&f| f > 0.0).collect();
+        if mhz.is_empty() { f32::NAN } else { mhz.iter().sum::<f32>() / mhz.len() as f32 / 1000.0 }
+    }
 
     /// Windows has no CPU temperature without a kernel driver; the platform uses PawnIO.
     #[cfg(windows)]

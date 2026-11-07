@@ -11,7 +11,9 @@ use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::SystemInformation::{GetSystemFirmwareTable, RSMB};
 use windows::Win32::System::Threading::{CreateMutexW, INFINITE, ReleaseMutex, WaitForSingleObject};
 use windows::Win32::UI::Shell::{IsUserAnAdmin, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
-use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONQUESTION, MB_YESNO, MessageBoxW, SW_SHOWNORMAL};
+use windows::Win32::UI::WindowsAndMessaging::{
+    IDYES, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MessageBoxW, SW_SHOWNORMAL,
+};
 use windows::core::{HSTRING, s};
 use windows::Wdk::Graphics::Direct3D::{
     D3DKMT_ADAPTER_PERFDATA, D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO, D3DKMTOpenAdapterFromLuid,
@@ -22,9 +24,13 @@ use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTW
 use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
 use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows::Win32::System::Performance::{
-    PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PdhAddEnglishCounterW,
-    PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhOpenQueryW,
+    PDH_FMT, PDH_FMT_COUNTERVALUE, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
+    PdhAddEnglishCounterW, PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhGetFormattedCounterValue,
+    PdhOpenQueryW,
 };
+
+/// Not exported by the windows crate (pdh.h: PDH_FMT_NOCAP100).
+const PDH_FMT_NOCAP100: PDH_FMT = PDH_FMT(0x8000);
 use windows::core::{PCWSTR, w};
 
 struct Adapter {
@@ -38,7 +44,11 @@ struct Adapter {
 pub struct Platform {
     pub gpu_name: String,
     pub vram_total: f64,
-    pub has_igpu: bool,
+    /// Becomes true once the driver reports a fan speed, so 0 can mean "fan off".
+    fan_seen: bool,
+    clock_query: PDH_HQUERY,
+    clock_base: PDH_HCOUNTER,
+    clock_perf: PDH_HCOUNTER,
     /// Legend text while there is no CPU temperature.
     pub cpu_temp_hint: &'static str,
     /// RAM type and speed, such as "DDR5 5600 MT/s".
@@ -52,15 +62,21 @@ pub struct Platform {
     engines: PDH_HCOUNTER,
     vram: PDH_HCOUNTER,
     dgpu: Option<Adapter>,
-    igpu: Option<Adapter>,
 }
 
 impl Platform {
     pub fn new() -> Self {
-        let mut adapters = adapters();
-        adapters.sort_by(|a, b| b.vram.total_cmp(&a.vram));
-        let mut adapters = adapters.into_iter();
-        let (dgpu, igpu) = (adapters.next(), adapters.next());
+        // The adapter with the most dedicated memory is the graphics card.
+        let dgpu = adapters().into_iter().max_by(|a, b| a.vram.total_cmp(&b.vram));
+
+        // Task Manager's CPU speed: base frequency times % Processor Performance.
+        let (mut clock_query, mut clock_base, mut clock_perf) = Default::default();
+        unsafe {
+            PdhOpenQueryW(PCWSTR::null(), 0, &mut clock_query);
+            PdhAddEnglishCounterW(clock_query, w!("\\Processor Information(_Total)\\Processor Frequency"), 0, &mut clock_base);
+            PdhAddEnglishCounterW(clock_query, w!("\\Processor Information(_Total)\\% Processor Performance"), 0, &mut clock_perf);
+            PdhCollectQueryData(clock_query);
+        }
 
         let (mut query, mut engines, mut vram) = Default::default();
         unsafe {
@@ -83,14 +99,20 @@ impl Platform {
             counter_items(disk_idle).into_iter().map(|(name, _)| name).filter(|n| n != "_total").collect();
         disk_keys.sort_by_key(|k| disk_label(k));
         let (pawnio, cpu_temp_hint) = match PawnIo::open() {
-            Ok(p) => (Some(p), "n/a"),
+            Ok(p) => {
+                offer_autostart();
+                (Some(p), "n/a")
+            }
             Err(hint) => (None, hint),
         };
 
         Self {
             gpu_name: dgpu.as_ref().map_or("GPU".into(), |g| g.name.clone()),
             vram_total: dgpu.as_ref().map_or(0.0, |g| g.vram),
-            has_igpu: igpu.is_some(),
+            fan_seen: false,
+            clock_query,
+            clock_base,
+            clock_perf,
             cpu_temp_hint,
             mem_speed: memory_speed(),
             pawnio,
@@ -102,8 +124,20 @@ impl Platform {
             engines,
             vram,
             dgpu,
-            igpu,
         }
+    }
+
+    /// Current CPU clock in GHz, as Task Manager computes it.
+    pub fn cpu_ghz(&mut self) -> f32 {
+        unsafe { PdhCollectQueryData(self.clock_query) };
+        let value = |counter| {
+            let mut v = PDH_FMT_COUNTERVALUE::default();
+            // NOCAP100: % Processor Performance goes above 100 while boosting.
+            let format = PDH_FMT(PDH_FMT_DOUBLE.0 | PDH_FMT_NOCAP100.0);
+            let ok = unsafe { PdhGetFormattedCounterValue(counter, format, None, &mut v) } == 0;
+            if ok && v.CStatus <= 1 { unsafe { v.Anonymous.doubleValue } } else { f64::NAN }
+        };
+        (value(self.clock_base) * value(self.clock_perf) / 100.0 / 1000.0) as f32
     }
 
     /// Bytes received and sent since boot on physical NICs that are up. Virtual
@@ -143,7 +177,11 @@ impl Platform {
             load = per_engine.values().fold(0.0f64, |a, &b| a.max(b)).min(100.0) as f32;
             vram_used = counter_items(self.vram).iter().filter(|(n, _)| n.contains(&gpu.tag)).map(|(_, v)| v).sum();
         }
-        Gpu { load, vram_used, temp: temperature(&self.dgpu), igpu_temp: temperature(&self.igpu) }
+        let perf = perf_data(&self.dgpu);
+        let temp = perf.filter(|p| p.Temperature > 0).map_or(f32::NAN, |p| p.Temperature as f32 / 10.0);
+        let fan = perf.map_or(0, |p| p.FanRPM);
+        self.fan_seen |= fan > 0;
+        Gpu { load, vram_used, temp, fan_rpm: if self.fan_seen { fan as f32 } else { f32::NAN } }
     }
 
     pub fn cpu_temp(&mut self) -> f32 {
@@ -246,7 +284,73 @@ fn is_amd_zen() -> bool {
 
 fn ask_install() -> bool {
     let text = w!("Vitals reads the CPU temperature through the PawnIO driver, which is bundled with it. PawnIO is signed by Microsoft and also used by LibreHardwareMonitor.\n\nInstall PawnIO now?");
-    unsafe { MessageBoxW(None, text, w!("Vitals"), MB_YESNO | MB_ICONQUESTION) == IDYES }
+    ask(text)
+}
+
+/// Yes/No question in front of the Vitals window (it is asked from the sampler thread).
+fn ask(text: PCWSTR) -> bool {
+    let style = MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST;
+    unsafe { MessageBoxW(None, text, w!("Vitals"), style) == IDYES }
+}
+
+/// Offers, once, a Task Scheduler task that starts Vitals at sign-in with
+/// administrator rights and no UAC prompt, so the CPU temperature is always there.
+/// Only called from an elevated Vitals with PawnIO working.
+fn offer_autostart() {
+    let declined = std::env::var("APPDATA").map(|d| std::path::PathBuf::from(d).join("Vitals").join("autostart-declined"));
+    if declined.as_ref().is_ok_and(|p| p.exists()) || schtasks(&["/Query", "/TN", "Vitals"]) {
+        return;
+    }
+    let text = w!("Start Vitals when you sign in?\n\nIt starts with administrator rights and no UAC prompt, so the CPU temperature is always shown. You can remove it later in Task Scheduler (task \"Vitals\").");
+    if !ask(text) {
+        if let Ok(path) = declined {
+            let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
+            let _ = std::fs::write(path, b"");
+        }
+        return;
+    }
+    let (Ok(exe), Ok(domain), Ok(user)) = (std::env::current_exe(), std::env::var("USERDOMAIN"), std::env::var("USERNAME")) else {
+        return;
+    };
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let user = esc(&format!("{domain}\\{user}"));
+    // Not the schtasks defaults: no 72-hour time limit, and it also runs on battery.
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Starts Vitals at sign-in with administrator rights, so it can read the CPU temperature.</Description></RegistrationInfo>
+  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>{}</Command></Exec></Actions>
+</Task>"#,
+        esc(&exe.to_string_lossy())
+    );
+    // schtasks reads task XML as UTF-16 with a byte order mark.
+    let bytes: Vec<u8> = std::iter::once(0xFEFFu16).chain(xml.encode_utf16()).flat_map(u16::to_le_bytes).collect();
+    let file = std::env::temp_dir().join("vitals-task.xml");
+    if std::fs::write(&file, bytes).is_ok() {
+        schtasks(&["/Create", "/TN", "Vitals", "/XML", &file.to_string_lossy(), "/F"]);
+        let _ = std::fs::remove_file(&file);
+    }
+}
+
+/// Runs schtasks.exe without a console window; true when it succeeds.
+fn schtasks(args: &[&str]) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("schtasks")
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Runs the embedded PawnIO installer and waits for it. Vitals is already
@@ -348,9 +452,9 @@ fn open_kmt(luid: LUID) -> Option<u32> {
     unsafe { D3DKMTOpenAdapterFromLuid(&mut open) }.is_ok().then_some(open.hAdapter)
 }
 
-/// Temperature in degrees C. The driver reports tenths of a degree.
-fn temperature(adapter: &Option<Adapter>) -> f32 {
-    let Some(handle) = adapter.as_ref().and_then(|a| a.kmt) else { return f32::NAN };
+/// The driver's live data: temperature in tenths of a degree C, fan speed in RPM.
+fn perf_data(adapter: &Option<Adapter>) -> Option<D3DKMT_ADAPTER_PERFDATA> {
+    let handle = adapter.as_ref()?.kmt?;
     let mut perf = D3DKMT_ADAPTER_PERFDATA::default();
     let mut query = D3DKMT_QUERYADAPTERINFO {
         hAdapter: handle,
@@ -358,8 +462,7 @@ fn temperature(adapter: &Option<Adapter>) -> f32 {
         pPrivateDriverData: &mut perf as *mut _ as *mut c_void,
         PrivateDriverDataSize: size_of::<D3DKMT_ADAPTER_PERFDATA>() as u32,
     };
-    let ok = unsafe { D3DKMTQueryAdapterInfo(&mut query) }.is_ok();
-    if ok && perf.Temperature > 0 { perf.Temperature as f32 / 10.0 } else { f32::NAN }
+    unsafe { D3DKMTQueryAdapterInfo(&mut query) }.is_ok().then_some(perf)
 }
 
 /// Every instance of a wildcard counter as (lowercase instance name, value).

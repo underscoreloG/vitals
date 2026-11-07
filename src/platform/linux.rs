@@ -13,14 +13,14 @@ use sysinfo::Networks;
 struct Card {
     name: String,
     dev: PathBuf,
-    temp: Option<PathBuf>,
+    /// hwmon folder with temp1_input (millidegrees) and fan1_input (RPM).
+    hwmon: Option<PathBuf>,
     vram: f64,
 }
 
 pub struct Platform {
     pub gpu_name: String,
     pub vram_total: f64,
-    pub has_igpu: bool,
     pub cpu_temp_hint: &'static str,
     /// The SMBIOS table with RAM speeds is root-only on Linux.
     pub mem_speed: Option<String>,
@@ -29,15 +29,12 @@ pub struct Platform {
     disk_at: Instant,
     networks: Option<Networks>,
     dgpu: Option<Card>,
-    igpu: Option<Card>,
 }
 
 impl Platform {
     pub fn new() -> Self {
-        let mut cards = cards();
-        cards.sort_by(|a, b| b.vram.total_cmp(&a.vram));
-        let mut cards = cards.into_iter();
-        let (dgpu, igpu) = (cards.next(), cards.next());
+        // The card with the most VRAM is the graphics card.
+        let dgpu = cards().into_iter().max_by(|a, b| a.vram.total_cmp(&b.vram));
 
         // Whole physical disks only: loop, dm, md and zram devices have no `device` link.
         let ticks = io_ticks();
@@ -47,7 +44,6 @@ impl Platform {
         Self {
             gpu_name: dgpu.as_ref().map_or("GPU".into(), |c| c.name.clone()),
             vram_total: dgpu.as_ref().map_or(0.0, |c| c.vram),
-            has_igpu: igpu.as_ref().is_some_and(|c| c.temp.is_some()),
             cpu_temp_hint: "n/a",
             mem_speed: None,
             disk_prev: disk_names.iter().map(|n| ticks[n]).collect(),
@@ -55,7 +51,6 @@ impl Platform {
             disk_at: Instant::now(),
             networks: Networks::new_with_refreshed_list().ok(),
             dgpu,
-            igpu,
         }
     }
 
@@ -91,8 +86,8 @@ impl Platform {
         Gpu {
             load: card.and_then(|c| read(&c.dev.join("gpu_busy_percent"))).map_or(f32::NAN, |v| v as f32),
             vram_used: card.and_then(|c| read(&c.dev.join("mem_info_vram_used"))).unwrap_or(f64::NAN),
-            temp: temperature(card),
-            igpu_temp: temperature(self.igpu.as_ref()),
+            temp: hwmon(card, "temp1_input").map_or(f32::NAN, |m| (m / 1000.0) as f32),
+            fan_rpm: hwmon(card, "fan1_input").map_or(f32::NAN, |rpm| rpm as f32),
         }
     }
 }
@@ -113,9 +108,9 @@ fn read(path: &Path) -> Option<f64> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-/// Edge temperature in degrees C; hwmon reports millidegrees.
-fn temperature(card: Option<&Card>) -> f32 {
-    card.and_then(|c| c.temp.as_deref()).and_then(read).map_or(f32::NAN, |m| (m / 1000.0) as f32)
+/// One hwmon value of the card, such as temp1_input (edge temperature).
+fn hwmon(card: Option<&Card>, file: &str) -> Option<f64> {
+    read(&card?.hwmon.as_ref()?.join(file))
 }
 
 /// GPUs as /sys/class/drm/cardN. Connector entries such as card0-DP-1 are skipped.
@@ -137,9 +132,8 @@ fn cards() -> Vec<Card> {
             };
             let product = fs::read_to_string(dev.join("product_name")).unwrap_or_default();
             let name = if product.trim().is_empty() { vendor.to_string() } else { product.trim().to_string() };
-            let hwmon = fs::read_dir(dev.join("hwmon")).ok().and_then(|mut d| d.next()?.ok());
-            let temp = hwmon.map(|h| h.path().join("temp1_input")).filter(|p| p.exists());
-            Some(Card { name, vram: read(&dev.join("mem_info_vram_total")).unwrap_or(0.0), temp, dev })
+            let hwmon = fs::read_dir(dev.join("hwmon")).ok().and_then(|mut d| d.next()?.ok()).map(|h| h.path());
+            Some(Card { name, vram: read(&dev.join("mem_info_vram_total")).unwrap_or(0.0), hwmon, dev })
         })
         .collect()
 }

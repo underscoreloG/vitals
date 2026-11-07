@@ -11,26 +11,29 @@
 
 ## What it shows
 
-| Block | Lines on the graph |
+| Block | What it shows |
 |---|---|
-| CPU | Usage, busiest core |
-| Memory | Used, against total |
+| Memory | A bar: used against total, with the RAM type and speed |
+| CPU | Usage and busiest core; the title shows the CPU name and current clock |
 | Disk activity | Share of time each physical disk is busy (Task Manager's "active time") |
 | Network | Download, upload on physical adapters only, so VPN and virtual adapter traffic is not counted twice |
 | GPU | Load, VRAM |
-| Temperature | CPU, GPU, integrated GPU (turns amber at 70 °C, red at 85 °C) |
+| Temperature | CPU and GPU, plus the GPU fan speed. CPU turns amber at 90 °C and red at 95 °C (Ryzen 7000 runs at 95 °C by design), GPU at 80 °C and 90 °C |
 
-It samples once per second. The window shows one column when narrow and two when wide, and follows the system light or dark theme. Everything except the Windows CPU temperature works without a driver or admin rights.
+It samples once per second. The window shows one column when narrow and two when wide, remembers its size and position, and follows the system light or dark theme. Everything except the Windows CPU temperature works without a driver or admin rights.
 
 ## What each OS can show
 
 | | Windows | Linux | macOS |
 |---|---|---|---|
 | CPU, memory | Yes | Yes | Yes |
+| CPU clock | Yes, computed like Task Manager | Yes, average of cores | Yes (not checked on Apple silicon) |
+| RAM type and speed | Yes (SMBIOS) | No: needs root | No |
 | Disk activity | Yes, by drive letter | Yes, by device (sda, nvme0n1) | Yes, as Disk 1, Disk 2 |
 | Network | Yes | Yes | Yes (en* interfaces) |
 | GPU load, VRAM | Yes, any vendor | AMD only (amdgpu) | Yes; memory shown against RAM, which the GPU shares |
 | GPU temperature | Yes, same source as Task Manager | AMD only | No public API |
+| GPU fan | When the driver reports it | AMD only | No |
 | CPU temperature | AMD Ryzen, with PawnIO and admin rights (see below) | Yes (k10temp, coretemp) | Apple silicon die sensors |
 
 Where a value is not available, the legend shows `n/a`.
@@ -41,6 +44,7 @@ Windows has no way to read an AMD CPU temperature without a kernel driver. Vital
 
 1. Right-click `vitals-windows-x64.exe`, then **Run as administrator**. The PawnIO device only accepts administrators.
 2. The first time, Vitals asks whether to install the bundled PawnIO 2.2.0 driver. Accept, and the CPU temperature appears.
+3. It then offers to start when you sign in, with administrator rights and no UAC prompt. This is a Task Scheduler task named `Vitals`; remove it there, or with `schtasks /Delete /TN Vitals /F`. If you move the exe, accept again from the new place.
 
 Without admin rights the legend shows `run as admin` and everything else works as usual. On an unsupported CPU it shows `AMD only`.
 

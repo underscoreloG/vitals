@@ -1,11 +1,11 @@
 [package]
 name = "vitals"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 
 [dependencies]
-eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "x11", "wayland", "persistence"] }
 sysinfo = { version = "0.40.1", default-features = false, features = ["system", "network", "component"] }
 
 [target."cfg(windows)".dependencies]
