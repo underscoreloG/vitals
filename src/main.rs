@@ -20,11 +20,6 @@ const GAP: f32 = 10.0;
 const GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 fn main() -> eframe::Result {
-    #[cfg(windows)]
-    if std::env::args().any(|a| a == "--install-pawnio") {
-        platform::install_pawnio();
-        return Ok(());
-    }
     let icon = eframe::icon_data::from_png_bytes(theme::ICON).expect("bundled icon is a valid PNG");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -86,6 +81,7 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 ui.add(egui::Image::new(&self.logo).fit_to_exact_size(vec2(22.0, 22.0)));
                 ui.label(RichText::new("Vitals").size(16.0).strong());
+                ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).size(12.0).color(t.muted));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.label(RichText::new(".org").size(13.0).color(theme::ACCENT));

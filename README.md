@@ -39,8 +39,10 @@ Where a value is not available, the legend shows `n/a`.
 
 Windows has no way to read an AMD CPU temperature without a kernel driver. Vitals bundles [PawnIO](https://pawnio.eu), the Microsoft-signed driver LibreHardwareMonitor also uses, which only runs signed, purpose-built modules.
 
-1. Once: run `vitals-windows-x64.exe --install-pawnio` and accept the UAC prompt. This runs the bundled PawnIO 2.2.0 installer.
-2. Run Vitals as administrator. The PawnIO device only accepts administrators; without admin rights the legend shows `needs admin` and everything else works as usual.
+1. Right-click `vitals-windows-x64.exe`, then **Run as administrator**. The PawnIO device only accepts administrators.
+2. The first time, Vitals asks whether to install the bundled PawnIO 2.2.0 driver. Accept, and the CPU temperature appears.
+
+Without admin rights the legend shows `run as admin` and everything else works as usual. On an unsupported CPU it shows `AMD only`.
 
 Supported: AMD Ryzen and EPYC from Zen to Zen 5 (families 17h to 1Ah). Not yet: Intel. Tested on a Ryzen 9 7950X with Memory Integrity on. Bundled file versions and licenses are listed in [`assets/pawnio`](assets/pawnio/README.md).
 
@@ -54,7 +56,7 @@ Prebuilt binaries are on the [Releases](../../releases) page.
 
 ## Resource use
 
-Measured on Windows 11 with a Ryzen 9 7950X and a Radeon RX 7900 XT: about 0% CPU and 60 to 110 MB of private memory depending on the moment, most of it the graphics driver's OpenGL runtime. Reading the CPU temperature through PawnIO adds no measurable cost. The executable is 8 MB, 3.3 MB of which is the PawnIO installer, only used by `--install-pawnio`.
+Measured on Windows 11 with a Ryzen 9 7950X and a Radeon RX 7900 XT: about 0% CPU and 60 to 110 MB of private memory depending on the moment, most of it the graphics driver's OpenGL runtime. Reading the CPU temperature through PawnIO adds no measurable cost. The executable is 8 MB, 3.3 MB of which is the PawnIO installer, only used the first time.
 
 ## Build
 

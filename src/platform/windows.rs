@@ -9,8 +9,8 @@ use std::ffi::c_void;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Threading::{CreateMutexW, INFINITE, ReleaseMutex, WaitForSingleObject};
-use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::Win32::UI::Shell::{IsUserAnAdmin, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONQUESTION, MB_YESNO, MessageBoxW, SW_SHOWNORMAL};
 use windows::core::{HSTRING, s};
 use windows::Wdk::Graphics::Direct3D::{
     D3DKMT_ADAPTER_PERFDATA, D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO, D3DKMTOpenAdapterFromLuid,
@@ -170,11 +170,25 @@ struct PawnIo {
 }
 
 impl PawnIo {
-    /// Err carries the legend hint: PawnIO is missing or this is not an AMD Zen CPU
-    /// ("n/a"), or the device refused a non-administrator ("needs admin").
+    /// Err carries the legend hint. The PawnIO device only accepts administrators,
+    /// so an elevated Vitals offers to install the bundled driver when it is missing.
     fn open() -> Result<Self, &'static str> {
+        if !is_amd_zen() {
+            return Err("AMD only");
+        }
+        if !unsafe { IsUserAnAdmin() }.as_bool() {
+            return Err("run as admin");
+        }
         let dir = std::env::var("ProgramFiles").map_err(|_| "n/a")?;
-        let lib = unsafe { LoadLibraryW(&HSTRING::from(format!("{dir}\\PawnIO\\PawnIOLib.dll"))) }.map_err(|_| "n/a")?;
+        let path = HSTRING::from(format!("{dir}\\PawnIO\\PawnIOLib.dll"));
+        let lib = match unsafe { LoadLibraryW(&path) } {
+            Ok(lib) => lib,
+            Err(_) if ask_install() => {
+                install_pawnio();
+                unsafe { LoadLibraryW(&path) }.map_err(|_| "no driver")?
+            }
+            Err(_) => return Err("no driver"),
+        };
         let (Some(open), Some(load), Some(execute)) = (unsafe {
             (GetProcAddress(lib, s!("pawnio_open")), GetProcAddress(lib, s!("pawnio_load")), GetProcAddress(lib, s!("pawnio_execute")))
         }) else {
@@ -185,7 +199,7 @@ impl PawnIo {
 
         let mut handle = HANDLE::default();
         if unsafe { open(&mut handle) } < 0 {
-            return Err("needs admin");
+            return Err("n/a");
         }
         if unsafe { load(handle, AMD_MODULE.as_ptr(), AMD_MODULE.len()) } < 0 {
             return Err("n/a");
@@ -215,8 +229,25 @@ impl PawnIo {
     }
 }
 
-/// `vitals --install-pawnio`: runs the embedded PawnIO installer, with one UAC prompt.
-pub fn install_pawnio() {
+/// AMD family 17h to 1Ah (Zen to Zen 5), the CPUs the AMDFamily17 module supports.
+fn is_amd_zen() -> bool {
+    use std::arch::x86_64::__cpuid;
+    let id = __cpuid(0);
+    let vendor = [id.ebx, id.edx, id.ecx].map(u32::to_le_bytes).concat();
+    let eax = __cpuid(1).eax;
+    let base = (eax >> 8) & 0xF;
+    let family = if base == 0xF { base + ((eax >> 20) & 0xFF) } else { base };
+    vendor == b"AuthenticAMD" && (0x17..=0x1A).contains(&family)
+}
+
+fn ask_install() -> bool {
+    let text = w!("Vitals reads the CPU temperature through the PawnIO driver, which is bundled with it. PawnIO is signed by Microsoft and also used by LibreHardwareMonitor.\n\nInstall PawnIO now?");
+    unsafe { MessageBoxW(None, text, w!("Vitals"), MB_YESNO | MB_ICONQUESTION) == IDYES }
+}
+
+/// Runs the embedded PawnIO installer and waits for it. Vitals is already
+/// elevated here, so there is no extra UAC prompt.
+fn install_pawnio() {
     let path = std::env::temp_dir().join("PawnIO_setup.exe");
     if std::fs::write(&path, PAWNIO_SETUP).is_err() {
         return;
