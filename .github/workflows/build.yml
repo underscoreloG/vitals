@@ -1,0 +1,67 @@
+name: Build
+
+# Builds the Linux and macOS versions. The Windows exe is built locally.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  linux:
+    # Oldest available runner, so the binary links against an older glibc.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo build --release
+      - name: Package
+        # A tarball keeps the executable bit.
+        run: |
+          mkdir dist
+          tar czf dist/vitals-linux-x64.tar.gz -C target/release vitals
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vitals-linux-x64
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Build
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+      - name: Bundle universal Vitals.app
+        run: |
+          app=Vitals.app/Contents
+          mkdir -p "$app/MacOS" "$app/Resources"
+          lipo -create -output "$app/MacOS/vitals" \
+            target/aarch64-apple-darwin/release/vitals target/x86_64-apple-darwin/release/vitals
+          cp assets/macos/Info.plist "$app/"
+          cp assets/macos/vitals.icns "$app/Resources/"
+          codesign --force --sign - Vitals.app
+      - name: Smoke test
+        # Fails if the app is no longer running after 10 s.
+        run: |
+          Vitals.app/Contents/MacOS/vitals &
+          pid=$!
+          sleep 10
+          screencapture -x smoke.png || true
+          kill "$pid"
+      - name: Package
+        run: |
+          mkdir dist
+          ditto -c -k --keepParent Vitals.app dist/vitals-macos-universal.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vitals-macos-universal
+          path: dist/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: macos-smoke-screenshot
+          path: smoke.png
+          if-no-files-found: ignore

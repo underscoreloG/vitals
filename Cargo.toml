@@ -1,0 +1,21 @@
+[package]
+name = "vitals"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+sysinfo = { version = "0.40.1", default-features = false, features = ["system", "network", "component"] }
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Performance", "Win32_Graphics_Dxgi", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Wdk_Graphics_Direct3D"] }
+
+[target."cfg(target_os = \"macos\")".dependencies]
+core-foundation = "0.10.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
