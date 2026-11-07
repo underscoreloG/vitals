@@ -68,3 +68,7 @@ cargo build --release
   <img src="docs/macos-vm.png" width="300" alt="Vitals on a macOS VM, light theme">
 </p>
 <p align="center"><sub>Linux under WSL (left) and macOS in a GitHub VM (right). Both VMs have no real GPU or temperature sensors, hence the n/a values.</sub></p>
+
+## License
+
+[MIT](LICENSE)
