@@ -18,6 +18,11 @@ const HISTORY: usize = 120;
 const TICK: Duration = Duration::from_secs(1);
 const GAP: f32 = 10.0;
 const MEMORY_HEIGHT: f32 = 46.0;
+/// Minimal mode: one row per block, values only.
+const ROW_HEIGHT: f32 = 34.0;
+const ROW_GAP: f32 = 6.0;
+/// Window margins plus the header line, used to size the window in minimal mode.
+const CHROME_HEIGHT: f32 = 12.0 + 30.0 + 12.0;
 const GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 fn main() -> eframe::Result {
@@ -25,13 +30,13 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([460.0, 860.0])
-            .with_min_inner_size([320.0, 420.0])
+            .with_min_inner_size([320.0, 240.0])
             .with_icon(Arc::new(icon)),
         // Reopens with the last window size and position.
         persist_window: true,
         ..Default::default()
     };
-    eframe::run_native("Vitals", options, Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx)))))
+    eframe::run_native("Vitals", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }
 
 #[derive(Default)]
@@ -43,10 +48,20 @@ struct State {
 struct App {
     state: Arc<Mutex<State>>,
     logo: egui::TextureHandle,
+    minimal: bool,
+    /// Window size to restore when leaving minimal mode.
+    full_size: Option<egui::Vec2>,
 }
 
 impl App {
-    fn new(ctx: &egui::Context) -> Self {
+    fn new(cc: &eframe::CreationContext) -> Self {
+        let ctx = &cc.egui_ctx;
+        let saved = |key| cc.storage.and_then(|s| s.get_string(key));
+        let minimal = saved("minimal").as_deref() == Some("true");
+        let full_size = saved("full_size").and_then(|s| {
+            let (w, h) = s.split_once(' ')?;
+            Some(vec2(w.parse().ok()?, h.parse().ok()?))
+        });
         theme::apply(ctx);
         let icon = eframe::icon_data::from_png_bytes(theme::ICON).expect("bundled icon is a valid PNG");
         let image = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
@@ -70,14 +85,37 @@ impl App {
                 repaint.request_repaint();
             }
         });
-        Self { state, logo }
+        Self { state, logo, minimal, full_size }
+    }
+
+    /// Switches mode and resizes the window: minimal fits its rows exactly,
+    /// and leaving it restores the size the graphs had.
+    fn toggle(&mut self, ctx: &egui::Context, rows: usize) {
+        let current = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
+        let size = if self.minimal {
+            self.full_size.unwrap_or(vec2(460.0, 860.0))
+        } else {
+            self.full_size = current;
+            let height = CHROME_HEIGHT + rows as f32 * ROW_HEIGHT + (rows - 1) as f32 * ROW_GAP;
+            vec2(current.map_or(460.0, |s| s.x), height)
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        self.minimal = !self.minimal;
     }
 }
 
 impl eframe::App for App {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string("minimal", self.minimal.to_string());
+        if let Some(size) = self.full_size {
+            storage.set_string("full_size", format!("{} {}", size.x, size.y));
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let t = theme::tokens(ui.visuals().dark_mode);
         let view = view(&self.state.lock().unwrap(), t);
+        let mut toggle = false;
 
         let frame = egui::Frame::new().fill(t.bg).inner_margin(12);
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
@@ -86,6 +124,9 @@ impl eframe::App for App {
                 ui.label(RichText::new("Vitals").size(16.0).strong());
                 ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).size(12.0).color(t.muted));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = if self.minimal { "Graphs" } else { "Minimal" };
+                    toggle = ui.add(egui::Button::new(RichText::new(label).size(12.0)).small()).clicked();
+                    ui.add_space(8.0);
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.label(RichText::new(".org").size(13.0).color(theme::ACCENT));
                     ui.label(RichText::new("kvlh").size(13.0).strong());
@@ -93,10 +134,22 @@ impl eframe::App for App {
             });
             ui.add_space(8.0);
 
+            // Minimal mode: every block as one row of values, no graphs.
+            if self.minimal {
+                let area = ui.available_rect_before_wrap();
+                let blocks = std::iter::once(&view.memory).chain(&view.charts);
+                for (i, chart) in blocks.enumerate() {
+                    let min = area.min + vec2(0.0, i as f32 * (ROW_HEIGHT + ROW_GAP));
+                    let rect = Rect::from_min_size(min, vec2(area.width(), ROW_HEIGHT));
+                    header(&ui.painter_at(rect), rect, chart, t);
+                }
+                return;
+            }
+
             // Memory changes slowly, so it is a slim full-width bar instead of a graph.
             let area = ui.available_rect_before_wrap();
             let memory = Rect::from_min_size(area.min, vec2(area.width(), MEMORY_HEIGHT));
-            draw_bar(ui, memory, &view.memory, view.memory_used, t);
+            draw_bar(ui, memory, &view.memory, view.memory_used, view.memory_color, t);
             let area = Rect::from_min_max(pos2(area.left(), memory.bottom() + GAP), area.max);
 
             // One column when narrow, two when wide; a short last row stretches to full width.
@@ -112,6 +165,9 @@ impl eframe::App for App {
                 draw(ui, Rect::from_min_size(min, vec2(w, h)), chart, t);
             }
         });
+        if toggle {
+            self.toggle(ui.ctx(), 1 + view.charts.len());
+        }
     }
 }
 
@@ -136,6 +192,8 @@ struct View {
     memory: Chart,
     /// Share of RAM in use, 0 to 1 (NaN before the first sample).
     memory_used: f32,
+    /// Blue, then amber from 80% used and red from 90%.
+    memory_color: Color32,
     charts: Vec<Chart>,
 }
 
@@ -184,6 +242,15 @@ fn view(state: &State, t: &Tokens) -> View {
         if rpm < 1.0 { "GPU fan off".to_string() } else { format!("GPU fan {rpm:.0} rpm") }
     });
     let used = last.map_or(f64::NAN, |x| x.mem_used);
+    let memory_used = (used / mem_total) as f32;
+    let memory_tone = if memory_used >= 0.9 { Some(t.danger) } else if memory_used >= 0.8 { Some(t.warning) } else { None };
+    let mut memory_series = series(
+        "Used",
+        t.info,
+        Vec::new(),
+        if used.is_finite() { format!("{:.1} / {:.1} GB", used / GB, mem_total / GB) } else { "n/a".into() },
+    );
+    memory_series.text_color = memory_tone;
 
     View {
         memory: Chart {
@@ -191,14 +258,10 @@ fn view(state: &State, t: &Tokens) -> View {
             subtitle: info.mem_speed.clone(),
             max: 100.0,
             scale: None,
-            series: vec![series(
-                "Used",
-                t.info,
-                Vec::new(),
-                if used.is_finite() { format!("{:.1} / {:.1} GB", used / GB, mem_total / GB) } else { "n/a".into() },
-            )],
+            series: vec![memory_series],
         },
-        memory_used: (used / mem_total) as f32,
+        memory_used,
+        memory_color: memory_tone.unwrap_or(t.info),
         charts: vec![
             Chart {
                 title: if info.cpu_name.is_empty() { "CPU".into() } else { info.cpu_name.clone() },
@@ -276,14 +339,14 @@ fn header(p: &Painter, rect: Rect, chart: &Chart, t: &Tokens) {
     }
 }
 
-fn draw_bar(ui: &egui::Ui, rect: Rect, chart: &Chart, fraction: f32, t: &Tokens) {
+fn draw_bar(ui: &egui::Ui, rect: Rect, chart: &Chart, fraction: f32, color: Color32, t: &Tokens) {
     let p = ui.painter_at(rect);
     header(&p, rect, chart, t);
     let bar = Rect::from_min_max(pos2(rect.left() + 12.0, rect.bottom() - 15.0), pos2(rect.right() - 12.0, rect.bottom() - 9.0));
     p.rect_filled(bar, CornerRadius::same(3), t.border);
     if fraction.is_finite() {
         let filled = Rect::from_min_size(bar.min, vec2(bar.width() * fraction.clamp(0.0, 1.0), bar.height()));
-        p.rect_filled(filled, CornerRadius::same(3), t.info);
+        p.rect_filled(filled, CornerRadius::same(3), color);
     }
 }
 
