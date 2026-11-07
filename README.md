@@ -1,0 +1,70 @@
+<p align="center"><img src="docs/icon-256.png" width="96" alt="Vitals icon"></p>
+
+<h1 align="center">Vitals</h1>
+
+<p align="center">A small performance monitor with nothing to click. One window, one graph per component, the last two minutes of history.<br>Rust + egui, for Windows, Linux and macOS.</p>
+
+<p align="center">
+  <img src="docs/windows.png" width="300" alt="Vitals on Windows, narrow window">
+  <img src="docs/windows-wide.png" width="520" alt="Vitals on Windows, wide window">
+</p>
+
+## What it shows
+
+| Block | Lines on the graph |
+|---|---|
+| CPU | Usage, busiest core |
+| Memory | Used, against total |
+| Disks | Active time of each physical disk |
+| Network | Download, upload on physical adapters only, so VPN and virtual adapter traffic is not counted twice |
+| GPU | Load, VRAM |
+| Temperature | CPU, GPU, integrated GPU (turns amber at 70 °C, red at 85 °C) |
+
+It samples once per second. The window shows one column when narrow and two when wide, and follows the system light or dark theme. No driver, admin or root rights are needed.
+
+## What each OS can show
+
+| | Windows | Linux | macOS |
+|---|---|---|---|
+| CPU, memory | Yes | Yes | Yes |
+| Disks | Yes, by drive letter | Yes, by device (sda, nvme0n1) | Yes, as Disk 1, Disk 2 |
+| Network | Yes | Yes | Yes (en* interfaces) |
+| GPU load, VRAM | Yes, any vendor | AMD only (amdgpu) | Yes; memory shown against RAM, which the GPU shares |
+| GPU temperature | Yes, same source as Task Manager | AMD only | No public API |
+| CPU temperature | No: Windows needs a kernel driver for it | Yes (k10temp, coretemp) | Apple silicon die sensors |
+
+Where a value is not available, the legend shows `n/a`.
+
+## Download and run
+
+Prebuilt binaries are on the [Releases](../../releases) page.
+
+- **Windows**: run `vitals-windows-x64.exe`. It is not code-signed, so SmartScreen may ask for confirmation the first time.
+- **Linux**: `tar xzf vitals-linux-x64.tar.gz && ./vitals`. Needs X11 or Wayland with OpenGL.
+- **macOS**: unzip `vitals-macos-universal.zip` and move `Vitals.app` to Applications. The app is ad-hoc signed, not notarized: open it the first time with right-click, Open, or run `xattr -dr com.apple.quarantine Vitals.app`. Universal build for Apple silicon and Intel.
+
+## Resource use
+
+Measured on Windows 11 with a Ryzen 9 7950X and a Radeon RX 7900 XT: about 0% CPU, a 4.7 MB executable, and about 105 MB of private memory, most of it the graphics driver's OpenGL runtime.
+
+## Build
+
+```sh
+cargo build --release
+```
+
+- `.github/workflows/build.yml` builds Linux (on Ubuntu 22.04, for an older glibc) and a universal, ad-hoc signed `Vitals.app` for macOS, then checks the app is still running after 10 seconds.
+- `assets/vitals-icon.svg` is the icon source. `assets/make-icon.ps1` renders it into `vitals.ico`, `vitals.res` (embedded in the Windows exe by `build.rs`) and `macos/vitals.icns`.
+- Platform code lives in `src/platform/`: one file per OS with the same small API.
+
+## Status
+
+- Windows: tested on Windows 11, values checked against Task Manager.
+- Linux: the release build runs (tested under WSL, which has no GPU or temperature sensors). GPU and temperature readings are untested on real hardware.
+- macOS: the release build runs on a GitHub macOS VM. GPU and disk readings are untested on a real Mac.
+
+<p align="center">
+  <img src="docs/linux-wsl.png" width="300" alt="Vitals on Linux under WSL, dark theme">
+  <img src="docs/macos-vm.png" width="300" alt="Vitals on a macOS VM, light theme">
+</p>
+<p align="center"><sub>Linux under WSL (left) and macOS in a GitHub VM (right). Both VMs have no real GPU or temperature sensors, hence the n/a values.</sub></p>
