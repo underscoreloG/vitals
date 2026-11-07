@@ -29,7 +29,9 @@ pub struct Sample {
 
 #[derive(Clone, Default)]
 pub struct Info {
+    pub cpu_name: String,
     pub mem_total: f64,
+    pub mem_speed: Option<String>,
     pub gpu_name: String,
     pub vram_total: f64,
     pub has_igpu: bool,
@@ -55,7 +57,9 @@ impl Sampler {
         sys.refresh_memory();
         let mut platform = Platform::new();
         let info = Info {
+            cpu_name: short_cpu_name(sys.cpus().first().map_or("", |c| c.brand())),
             mem_total: sys.total_memory() as f64,
+            mem_speed: platform.mem_speed.clone(),
             gpu_name: platform.gpu_name.clone(),
             vram_total: platform.vram_total,
             has_igpu: platform.has_igpu,
@@ -95,6 +99,7 @@ impl Sampler {
         }
     }
 
+
     /// Windows has no CPU temperature without a kernel driver; the platform uses PawnIO.
     #[cfg(windows)]
     fn cpu_temp(&mut self) -> f32 {
@@ -117,4 +122,14 @@ impl Sampler {
             .filter_map(|c| c.temperature())
             .fold(f32::NAN, f32::max)
     }
+}
+
+/// "AMD Ryzen 9 7950X 16-Core Processor" becomes "AMD Ryzen 9 7950X",
+/// "Intel(R) Core(TM) i7-8700K CPU @ 3.70GHz" becomes "Intel Core i7-8700K".
+fn short_cpu_name(brand: &str) -> String {
+    let name = brand.replace("(R)", "").replace("(TM)", "").replace("(tm)", "");
+    let name = name.split(" @ ").next().unwrap_or_default().split(" with ").next().unwrap_or_default();
+    let words: Vec<&str> =
+        name.split_whitespace().filter(|w| !w.ends_with("-Core") && !matches!(*w, "Processor" | "CPU")).collect();
+    if words.is_empty() { "CPU".into() } else { words.join(" ") }
 }

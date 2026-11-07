@@ -116,6 +116,8 @@ struct Series {
 
 struct Chart {
     title: String,
+    /// Shown muted after the title, such as the RAM speed.
+    subtitle: Option<String>,
     max: f32,
     scale: Option<String>,
     series: Vec<Series>,
@@ -164,7 +166,8 @@ fn charts(state: &State, t: &Tokens) -> Vec<Chart> {
 
     vec![
         Chart {
-            title: "CPU".into(),
+            title: if info.cpu_name.is_empty() { "CPU".into() } else { info.cpu_name.clone() },
+            subtitle: None,
             max: 100.0,
             scale: None,
             series: vec![
@@ -174,6 +177,7 @@ fn charts(state: &State, t: &Tokens) -> Vec<Chart> {
         },
         Chart {
             title: "Memory".into(),
+            subtitle: info.mem_speed.clone(),
             max: 100.0,
             scale: None,
             series: vec![series(
@@ -183,9 +187,10 @@ fn charts(state: &State, t: &Tokens) -> Vec<Chart> {
                 last.map_or("n/a".into(), |x| format!("{:.1} / {:.1} GB", x.mem_used / GB, mem_total / GB)),
             )],
         },
-        Chart { title: "Disks".into(), max: 100.0, scale: None, series: disks },
+        Chart { title: "Disks".into(), subtitle: None, max: 100.0, scale: None, series: disks },
         Chart {
             title: "Network".into(),
+            subtitle: None,
             max: net_max as f32,
             scale: Some(rate(net_max)),
             series: vec![
@@ -195,6 +200,7 @@ fn charts(state: &State, t: &Tokens) -> Vec<Chart> {
         },
         Chart {
             title: info.gpu_name.clone(),
+            subtitle: None,
             max: 100.0,
             scale: None,
             series: vec![
@@ -208,7 +214,7 @@ fn charts(state: &State, t: &Tokens) -> Vec<Chart> {
                 ),
             ],
         },
-        Chart { title: "Temperature".into(), max: 100.0, scale: Some("100°C".into()), series: temps },
+        Chart { title: "Temperature".into(), subtitle: None, max: 100.0, scale: Some("100°C".into()), series: temps },
     ]
 }
 
@@ -224,7 +230,6 @@ fn rate(bytes: f64) -> String {
 fn draw(ui: &egui::Ui, rect: Rect, chart: &Chart, t: &Tokens) {
     let p = ui.painter_at(rect);
     p.rect(rect, CornerRadius::same(12), t.elevated, Stroke::new(1.0, t.border), StrokeKind::Inside);
-    p.text(rect.left_top() + vec2(12.0, 10.0), Align2::LEFT_TOP, &chart.title, FontId::proportional(14.0), t.fg);
 
     // Legend, right-aligned: dot, label, current value, with a | between items.
     let mut x = rect.right() - 12.0;
@@ -237,6 +242,13 @@ fn draw(ui: &egui::Ui, rect: Rect, chart: &Chart, t: &Tokens) {
         let label = p.text(pos2(value.left() - 5.0, y), Align2::RIGHT_TOP, &s.label, FontId::proportional(12.0), t.muted);
         p.circle_filled(pos2(label.left() - 7.0, label.center().y), 3.5, s.color);
         x = label.left() - 21.0;
+    }
+
+    // Title and subtitle, clipped so a long CPU or GPU name never runs into the legend.
+    let title = p.with_clip_rect(Rect::from_min_max(rect.left_top(), pos2(x + 10.0, rect.top() + 30.0)));
+    let end = title.text(rect.left_top() + vec2(12.0, 10.0), Align2::LEFT_TOP, &chart.title, FontId::proportional(14.0), t.fg);
+    if let Some(subtitle) = &chart.subtitle {
+        title.text(pos2(end.right() + 8.0, y), Align2::LEFT_TOP, subtitle, FontId::proportional(12.0), t.muted);
     }
 
     let plot = Rect::from_min_max(rect.left_top() + vec2(12.0, 34.0), rect.right_bottom() - vec2(12.0, 12.0));

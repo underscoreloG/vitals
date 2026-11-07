@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::SystemInformation::{GetSystemFirmwareTable, RSMB};
 use windows::Win32::System::Threading::{CreateMutexW, INFINITE, ReleaseMutex, WaitForSingleObject};
 use windows::Win32::UI::Shell::{IsUserAnAdmin, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONQUESTION, MB_YESNO, MessageBoxW, SW_SHOWNORMAL};
@@ -40,6 +41,8 @@ pub struct Platform {
     pub has_igpu: bool,
     /// Legend text while there is no CPU temperature.
     pub cpu_temp_hint: &'static str,
+    /// RAM type and speed, such as "DDR5 5600 MT/s".
+    pub mem_speed: Option<String>,
     pawnio: Option<PawnIo>,
     pub disk_names: Vec<String>,
     disk_keys: Vec<String>,
@@ -89,6 +92,7 @@ impl Platform {
             vram_total: dgpu.as_ref().map_or(0.0, |g| g.vram),
             has_igpu: igpu.is_some(),
             cpu_temp_hint,
+            mem_speed: memory_speed(),
             pawnio,
             disk_names: disk_keys.iter().map(|k| disk_label(k)).collect(),
             disk_keys,
@@ -269,6 +273,45 @@ fn install_pawnio() {
         }
     }
     let _ = std::fs::remove_file(&path);
+}
+
+/// RAM type and speed from the SMBIOS memory device entries (type 17), the same
+/// data Task Manager shows. Prefers the configured speed (XMP/EXPO) over the rated one.
+fn memory_speed() -> Option<String> {
+    let size = unsafe { GetSystemFirmwareTable(RSMB, 0, None) };
+    let mut buf = vec![0u8; size as usize];
+    if size == 0 || unsafe { GetSystemFirmwareTable(RSMB, 0, Some(&mut buf)) } != size {
+        return None;
+    }
+    let data = buf.get(8..)?; // RawSMBIOSData header
+    let (mut speed, mut kind, mut i) = (0u16, 0u8, 0usize);
+    while i + 4 <= data.len() && data[i] != 127 {
+        let len = data[i + 1] as usize;
+        if data[i] == 17 && len >= 0x22 && i + len <= data.len() {
+            let entry = &data[i..i + len];
+            let word = |at: usize| u16::from_le_bytes([entry[at], entry[at + 1]]);
+            // 0 and 0xFFFF mean the configured speed is unknown: fall back to the rated one.
+            let mts = if (1..0xFFFF).contains(&word(0x20)) { word(0x20) } else { word(0x15) };
+            if mts > speed {
+                (speed, kind) = (mts, entry[0x12]);
+            }
+        }
+        // The formatted part is followed by a string set that ends with two NULs.
+        let mut j = i + len;
+        while j + 1 < data.len() && (data[j] != 0 || data[j + 1] != 0) {
+            j += 1;
+        }
+        i = j + 2;
+    }
+    let kind = match kind {
+        0x18 => "DDR3 ",
+        0x1A => "DDR4 ",
+        0x1E => "LPDDR4 ",
+        0x22 => "DDR5 ",
+        0x23 => "LPDDR5 ",
+        _ => "",
+    };
+    (speed > 0).then(|| format!("{kind}{speed} MT/s"))
 }
 
 /// PDH instance to label: "3 c: g:" becomes "C: G:", a disk without a letter "Disk 4".

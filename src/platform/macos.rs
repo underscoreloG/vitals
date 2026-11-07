@@ -27,6 +27,8 @@ pub struct Platform {
     pub vram_total: f64,
     pub has_igpu: bool,
     pub cpu_temp_hint: &'static str,
+    /// Apple silicon does not report a RAM speed.
+    pub mem_speed: Option<String>,
     pub disk_names: Vec<String>,
     disk_prev: Vec<f64>,
     disk_at: Instant,
@@ -47,6 +49,7 @@ impl Platform {
             vram_total: ram,
             has_igpu: false,
             cpu_temp_hint: "n/a",
+            mem_speed: None,
             disk_names: (1..=disk_prev.len()).map(|i| format!("Disk {i}")).collect(),
             disk_prev,
             disk_at: Instant::now(),

@@ -22,6 +22,8 @@ pub struct Platform {
     pub vram_total: f64,
     pub has_igpu: bool,
     pub cpu_temp_hint: &'static str,
+    /// The SMBIOS table with RAM speeds is root-only on Linux.
+    pub mem_speed: Option<String>,
     pub disk_names: Vec<String>,
     disk_prev: Vec<f64>,
     disk_at: Instant,
@@ -47,6 +49,7 @@ impl Platform {
             vram_total: dgpu.as_ref().map_or(0.0, |c| c.vram),
             has_igpu: igpu.as_ref().is_some_and(|c| c.temp.is_some()),
             cpu_temp_hint: "n/a",
+            mem_speed: None,
             disk_prev: disk_names.iter().map(|n| ticks[n]).collect(),
             disk_names,
             disk_at: Instant::now(),
