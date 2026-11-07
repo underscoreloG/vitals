@@ -15,7 +15,7 @@
 |---|---|
 | CPU | Usage, busiest core |
 | Memory | Used, against total |
-| Disks | Active time of each physical disk |
+| Disk activity | Share of time each physical disk is busy (Task Manager's "active time") |
 | Network | Download, upload on physical adapters only, so VPN and virtual adapter traffic is not counted twice |
 | GPU | Load, VRAM |
 | Temperature | CPU, GPU, integrated GPU (turns amber at 70 °C, red at 85 °C) |
@@ -27,7 +27,7 @@ It samples once per second. The window shows one column when narrow and two when
 | | Windows | Linux | macOS |
 |---|---|---|---|
 | CPU, memory | Yes | Yes | Yes |
-| Disks | Yes, by drive letter | Yes, by device (sda, nvme0n1) | Yes, as Disk 1, Disk 2 |
+| Disk activity | Yes, by drive letter | Yes, by device (sda, nvme0n1) | Yes, as Disk 1, Disk 2 |
 | Network | Yes | Yes | Yes (en* interfaces) |
 | GPU load, VRAM | Yes, any vendor | AMD only (amdgpu) | Yes; memory shown against RAM, which the GPU shares |
 | GPU temperature | Yes, same source as Task Manager | AMD only | No public API |

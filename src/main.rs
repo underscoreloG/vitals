@@ -187,7 +187,7 @@ fn charts(state: &State, t: &Tokens) -> Vec<Chart> {
                 last.map_or("n/a".into(), |x| format!("{:.1} / {:.1} GB", x.mem_used / GB, mem_total / GB)),
             )],
         },
-        Chart { title: "Disks".into(), subtitle: None, max: 100.0, scale: None, series: disks },
+        Chart { title: "Disk activity".into(), subtitle: None, max: 100.0, scale: None, series: disks },
         Chart {
             title: "Network".into(),
             subtitle: None,
