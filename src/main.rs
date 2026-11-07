@@ -22,13 +22,21 @@ const ROW_HEIGHT: f32 = 34.0;
 const ROW_GAP: f32 = 6.0;
 /// Window margins plus the header line, used to size the window in minimal mode.
 const CHROME_HEIGHT: f32 = 12.0 + 30.0 + 12.0;
+/// CPU, Memory, GPU, Network, Disk activity, Temperature.
+const BLOCKS: usize = 6;
+
+/// Window height that fits `rows` minimal-mode rows exactly.
+fn minimal_height(rows: usize) -> f32 {
+    CHROME_HEIGHT + rows as f32 * ROW_HEIGHT + (rows - 1) as f32 * ROW_GAP
+}
 const GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 fn main() -> eframe::Result {
     let icon = eframe::icon_data::from_png_bytes(theme::ICON).expect("bundled icon is a valid PNG");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([460.0, 860.0])
+            // First launch opens in minimal mode, sized to its rows.
+            .with_inner_size([460.0, minimal_height(BLOCKS)])
             .with_min_inner_size([320.0, 240.0])
             .with_icon(Arc::new(icon)),
         // Reopens with the last window size and position.
@@ -56,7 +64,8 @@ impl App {
     fn new(cc: &eframe::CreationContext) -> Self {
         let ctx = &cc.egui_ctx;
         let saved = |key| cc.storage.and_then(|s| s.get_string(key));
-        let minimal = saved("minimal").as_deref() == Some("true");
+        // Minimal is the default; a saved choice of Graphs wins.
+        let minimal = saved("minimal").as_deref() != Some("false");
         let full_size = saved("full_size").and_then(|s| {
             let (w, h) = s.split_once(' ')?;
             Some(vec2(w.parse().ok()?, h.parse().ok()?))
@@ -95,8 +104,7 @@ impl App {
             self.full_size.unwrap_or(vec2(460.0, 860.0))
         } else {
             self.full_size = current;
-            let height = CHROME_HEIGHT + rows as f32 * ROW_HEIGHT + (rows - 1) as f32 * ROW_GAP;
-            vec2(current.map_or(460.0, |s| s.x), height)
+            vec2(current.map_or(460.0, |s| s.x), minimal_height(rows))
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         self.minimal = !self.minimal;
