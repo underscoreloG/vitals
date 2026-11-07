@@ -119,54 +119,68 @@ impl eframe::App for App {
 
         let frame = egui::Frame::new().fill(t.bg).inner_margin(12);
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
-            ui.horizontal(|ui| {
+            let mut left_end = 0.0;
+            let top = ui.horizontal(|ui| {
                 ui.add(egui::Image::new(&self.logo).fit_to_exact_size(vec2(22.0, 22.0)));
                 ui.label(RichText::new("Vitals").size(16.0).strong());
                 ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).size(12.0).color(t.muted));
+                left_end = ui.min_rect().right();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = if self.minimal { "Graphs" } else { "Minimal" };
-                    toggle = ui.add(egui::Button::new(RichText::new(label).size(12.0)).small()).clicked();
-                    ui.add_space(8.0);
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.label(RichText::new(".org").size(13.0).color(theme::ACCENT));
                     ui.label(RichText::new("kvlh").size(13.0).strong());
                 });
             });
+
+            // Mode switch, centered in the top bar; pushed right when the window is too narrow.
+            let label = if self.minimal { "Graphs" } else { "Minimal" };
+            let size = ui.painter().layout_no_wrap(label.into(), FontId::proportional(12.0), t.fg).size() + vec2(16.0, 6.0);
+            let bar = top.response.rect;
+            let center = pos2(bar.center().x.max(left_end + 8.0 + size.x / 2.0), bar.center().y);
+            toggle = ui.put(Rect::from_center_size(center, size), egui::Button::new(RichText::new(label).size(12.0))).clicked();
             ui.add_space(8.0);
+
+            let area = ui.available_rect_before_wrap();
 
             // Minimal mode: every block as one row of values, no graphs.
             if self.minimal {
-                let area = ui.available_rect_before_wrap();
-                let blocks = std::iter::once(&view.memory).chain(&view.charts);
-                for (i, chart) in blocks.enumerate() {
+                for (i, block) in view.iter().enumerate() {
                     let min = area.min + vec2(0.0, i as f32 * (ROW_HEIGHT + ROW_GAP));
                     let rect = Rect::from_min_size(min, vec2(area.width(), ROW_HEIGHT));
-                    header(&ui.painter_at(rect), rect, chart, t);
+                    header(&ui.painter_at(rect), rect, &block.chart, t);
                 }
                 return;
             }
 
-            // Memory changes slowly, so it is a slim full-width bar instead of a graph.
-            let area = ui.available_rect_before_wrap();
-            let memory = Rect::from_min_size(area.min, vec2(area.width(), MEMORY_HEIGHT));
-            draw_bar(ui, memory, &view.memory, view.memory_used, view.memory_color, t);
-            let area = Rect::from_min_max(pos2(area.left(), memory.bottom() + GAP), area.max);
-
-            // One column when narrow, two when wide; a short last row stretches to full width.
-            let charts = &view.charts;
+            // Graphs share rows: one per row when narrow, two when wide. The memory bar
+            // always takes a full-width row, and a graph left alone on a row stretches.
             let cols = if area.width() >= 760.0 { 2 } else { 1 };
-            let rows = charts.len().div_ceil(cols);
-            let h = (area.height() - GAP * (rows - 1) as f32) / rows as f32;
-            for (i, chart) in charts.iter().enumerate() {
-                let (row, col) = (i / cols, i % cols);
-                let in_row = (charts.len() - row * cols).min(cols);
-                let w = (area.width() - GAP * (in_row - 1) as f32) / in_row as f32;
-                let min = area.min + vec2(col as f32 * (w + GAP), row as f32 * (h + GAP));
-                draw(ui, Rect::from_min_size(min, vec2(w, h)), chart, t);
+            let mut rows: Vec<Vec<&Block>> = Vec::new();
+            for block in &view {
+                match rows.last_mut() {
+                    Some(row) if block.bar.is_none() && row[0].bar.is_none() && row.len() < cols => row.push(block),
+                    _ => rows.push(vec![block]),
+                }
+            }
+            let bars = rows.iter().filter(|r| r[0].bar.is_some()).count();
+            let free = area.height() - GAP * (rows.len() - 1) as f32 - bars as f32 * MEMORY_HEIGHT;
+            let h = free / (rows.len() - bars).max(1) as f32;
+            let mut y = area.top();
+            for row in rows {
+                let height = if row[0].bar.is_some() { MEMORY_HEIGHT } else { h };
+                let w = (area.width() - GAP * (row.len() - 1) as f32) / row.len() as f32;
+                for (i, block) in row.iter().enumerate() {
+                    let rect = Rect::from_min_size(pos2(area.left() + i as f32 * (w + GAP), y), vec2(w, height));
+                    match block.bar {
+                        Some((used, color)) => draw_bar(ui, rect, &block.chart, used, color, t),
+                        None => draw(ui, rect, &block.chart, t),
+                    }
+                }
+                y += height + GAP;
             }
         });
         if toggle {
-            self.toggle(ui.ctx(), 1 + view.charts.len());
+            self.toggle(ui.ctx(), view.len());
         }
     }
 }
@@ -188,20 +202,23 @@ struct Chart {
     series: Vec<Series>,
 }
 
-struct View {
-    memory: Chart,
-    /// Share of RAM in use, 0 to 1 (NaN before the first sample).
-    memory_used: f32,
-    /// Blue, then amber from 80% used and red from 90%.
-    memory_color: Color32,
-    charts: Vec<Chart>,
+/// One block of the window, in display order.
+struct Block {
+    chart: Chart,
+    /// Memory is a slim bar instead of a graph: share used (0 to 1, NaN before
+    /// the first sample) and its colour (blue, amber from 80%, red from 90%).
+    bar: Option<(f32, Color32)>,
+}
+
+fn graph(chart: Chart) -> Block {
+    Block { chart, bar: None }
 }
 
 fn series(label: impl Into<String>, color: Color32, values: Vec<f32>, text: String) -> Series {
     Series { label: label.into(), color, values, text, text_color: None }
 }
 
-fn view(state: &State, t: &Tokens) -> View {
+fn view(state: &State, t: &Tokens) -> Vec<Block> {
     let (info, s) = (&state.info, &state.samples);
     let last = s.back();
     let col = |f: &dyn Fn(&Sample) -> f32| s.iter().map(f).collect::<Vec<f32>>();
@@ -252,57 +269,56 @@ fn view(state: &State, t: &Tokens) -> View {
     );
     memory_series.text_color = memory_tone;
 
-    View {
-        memory: Chart {
-            title: "Memory".into(),
-            subtitle: info.mem_speed.clone(),
+    vec![
+        graph(Chart {
+            title: if info.cpu_name.is_empty() { "CPU".into() } else { info.cpu_name.clone() },
+            subtitle: ghz,
             max: 100.0,
             scale: None,
-            series: vec![memory_series],
+            series: vec![
+                series("Usage", t.info, col(&|x| x.cpu), pct(|x| x.cpu)),
+                series("Top core", t.warning, col(&|x| x.top_core), pct(|x| x.top_core)),
+            ],
+        }),
+        Block {
+            chart: Chart {
+                title: "Memory".into(),
+                subtitle: info.mem_speed.clone(),
+                max: 100.0,
+                scale: None,
+                series: vec![memory_series],
+            },
+            bar: Some((memory_used, memory_tone.unwrap_or(t.info))),
         },
-        memory_used,
-        memory_color: memory_tone.unwrap_or(t.info),
-        charts: vec![
-            Chart {
-                title: if info.cpu_name.is_empty() { "CPU".into() } else { info.cpu_name.clone() },
-                subtitle: ghz,
-                max: 100.0,
-                scale: None,
-                series: vec![
-                    series("Usage", t.info, col(&|x| x.cpu), pct(|x| x.cpu)),
-                    series("Top core", t.warning, col(&|x| x.top_core), pct(|x| x.top_core)),
-                ],
-            },
-            Chart { title: "Disk activity".into(), subtitle: None, max: 100.0, scale: None, series: disks },
-            Chart {
-                title: "Network".into(),
-                subtitle: None,
-                max: net_max as f32,
-                scale: Some(rate(net_max)),
-                series: vec![
-                    series("Down", t.info, col(&|x| x.net_down as f32), last.map_or("n/a".into(), |x| rate(x.net_down))),
-                    series("Up", t.warning, col(&|x| x.net_up as f32), last.map_or("n/a".into(), |x| rate(x.net_up))),
-                ],
-            },
-            Chart {
-                title: info.gpu_name.clone(),
-                subtitle: None,
-                max: 100.0,
-                scale: None,
-                series: vec![
-                    series("Load", t.info, col(&|x| x.gpu.load), pct(|x| x.gpu.load)),
-                    series(
-                        "VRAM",
-                        t.warning,
-                        col(&|x| (x.gpu.vram_used / vram_total * 100.0) as f32),
-                        last.filter(|x| x.gpu.vram_used.is_finite() && vram_total > 0.0)
-                            .map_or("n/a".into(), |x| format!("{:.1} / {:.0} GB", x.gpu.vram_used / GB, vram_total / GB)),
-                    ),
-                ],
-            },
-            Chart { title: "Temperature".into(), subtitle: fan, max: 100.0, scale: Some("100°C".into()), series: temps },
-        ],
-    }
+        graph(Chart {
+            title: info.gpu_name.clone(),
+            subtitle: None,
+            max: 100.0,
+            scale: None,
+            series: vec![
+                series("Load", t.info, col(&|x| x.gpu.load), pct(|x| x.gpu.load)),
+                series(
+                    "VRAM",
+                    t.warning,
+                    col(&|x| (x.gpu.vram_used / vram_total * 100.0) as f32),
+                    last.filter(|x| x.gpu.vram_used.is_finite() && vram_total > 0.0)
+                        .map_or("n/a".into(), |x| format!("{:.1} / {:.0} GB", x.gpu.vram_used / GB, vram_total / GB)),
+                ),
+            ],
+        }),
+        graph(Chart {
+            title: "Network".into(),
+            subtitle: None,
+            max: net_max as f32,
+            scale: Some(rate(net_max)),
+            series: vec![
+                series("Down", t.info, col(&|x| x.net_down as f32), last.map_or("n/a".into(), |x| rate(x.net_down))),
+                series("Up", t.warning, col(&|x| x.net_up as f32), last.map_or("n/a".into(), |x| rate(x.net_up))),
+            ],
+        }),
+        graph(Chart { title: "Disk activity".into(), subtitle: None, max: 100.0, scale: None, series: disks }),
+        graph(Chart { title: "Temperature".into(), subtitle: fan, max: 100.0, scale: Some("100°C".into()), series: temps }),
+    ]
 }
 
 fn rate(bytes: f64) -> String {

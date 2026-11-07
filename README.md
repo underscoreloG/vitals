@@ -13,14 +13,14 @@
 
 | Block | What it shows |
 |---|---|
-| Memory | A bar: used against total, with the RAM type and speed. Amber from 80% used, red from 90% |
 | CPU | Usage and busiest core; the title shows the CPU name and current clock |
-| Disk activity | Share of time each physical disk is busy (Task Manager's "active time") |
-| Network | Download, upload on physical adapters only, so VPN and virtual adapter traffic is not counted twice |
+| Memory | A bar: used against total, with the RAM type and speed. Amber from 80% used, red from 90% |
 | GPU | Load, VRAM |
+| Network | Download, upload on physical adapters only, so VPN and virtual adapter traffic is not counted twice |
+| Disk activity | Share of time each physical disk is busy (Task Manager's "active time") |
 | Temperature | CPU and GPU, plus the GPU fan speed. CPU turns amber at 90 °C and red at 95 °C (Ryzen 7000 runs at 95 °C by design), GPU at 80 °C and 90 °C |
 
-It samples once per second. The window shows one column when narrow and two when wide, remembers its size and position, and follows the system light or dark theme. The **Minimal** button in the header switches to one line of values per block, with no graphs, and shrinks the window to fit; **Graphs** switches back. The mode is remembered. Everything except the Windows CPU temperature works without a driver or admin rights.
+It samples once per second. The window shows one column when narrow and two when wide, remembers its size and position, and follows the system light or dark theme. The **Minimal** button in the middle of the top bar switches to one line of values per block, with no graphs, and shrinks the window to fit; **Graphs** switches back. The mode is remembered. Everything except the Windows CPU temperature works without a driver or admin rights.
 
 ## What each OS can show
 
