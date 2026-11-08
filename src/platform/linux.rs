@@ -29,6 +29,11 @@ pub struct Platform {
     disk_at: Instant,
     networks: Option<Networks>,
     dgpu: Option<Card>,
+    /// Motherboard and other fans; the graphics card's fan comes with `gpu()`.
+    pub fan_names: Vec<String>,
+    /// Legend text while board fans cannot be read; hwmon needs no root.
+    pub fan_hint: &'static str,
+    fan_inputs: Vec<PathBuf>,
 }
 
 impl Platform {
@@ -41,7 +46,11 @@ impl Platform {
         let mut disk_names: Vec<String> =
             ticks.keys().filter(|n| Path::new("/sys/block").join(n).join("device").exists()).cloned().collect();
         disk_names.sort();
+        let (fan_names, fan_inputs) = board_fans(dgpu.as_ref().and_then(|c| c.hwmon.as_deref())).into_iter().unzip();
         Self {
+            fan_names,
+            fan_hint: "",
+            fan_inputs,
             gpu_name: dgpu.as_ref().map_or("GPU".into(), |c| c.name.clone()),
             vram_total: dgpu.as_ref().map_or(0.0, |c| c.vram),
             cpu_temp_hint: "n/a",
@@ -70,6 +79,11 @@ impl Platform {
             }
         }
         out
+    }
+
+    /// RPM of each fan in `fan_names`.
+    pub fn board_fans(&mut self) -> Vec<f32> {
+        self.fan_inputs.iter().map(|input| read(input).map_or(f32::NAN, |rpm| rpm as f32)).collect()
     }
 
     pub fn net_totals(&mut self) -> (u64, u64) {
@@ -106,6 +120,27 @@ fn io_ticks() -> HashMap<String, f64> {
 
 fn read(path: &Path) -> Option<f64> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Fans of every hwmon chip (the motherboard's Super I/O through nct6775, it87 and
+/// the like) except the graphics card's, with their labels when the driver has them.
+/// Only fans spinning at startup: these chips also list every unused header at 0 RPM.
+fn board_fans(gpu_hwmon: Option<&Path>) -> Vec<(String, PathBuf)> {
+    let Ok(dir) = fs::read_dir("/sys/class/hwmon") else { return Vec::new() };
+    let gpu = gpu_hwmon.and_then(|p| fs::canonicalize(p).ok());
+    let mut chips: Vec<PathBuf> = dir.flatten().map(|e| e.path()).collect();
+    chips.sort();
+    let mut fans = Vec::new();
+    for chip in chips.into_iter().filter(|c| gpu.is_none() || fs::canonicalize(c).ok() != gpu) {
+        for n in 1..=16 {
+            let input = chip.join(format!("fan{n}_input"));
+            if read(&input).is_some_and(|rpm| rpm > 0.0) {
+                let label = fs::read_to_string(chip.join(format!("fan{n}_label"))).map(|l| l.trim().to_string());
+                fans.push((label.ok().filter(|l| !l.is_empty()).unwrap_or(format!("Fan {n}")), input));
+            }
+        }
+    }
+    fans
 }
 
 /// One hwmon value of the card, such as temp1_input (edge temperature).

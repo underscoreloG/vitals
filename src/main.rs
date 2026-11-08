@@ -10,7 +10,7 @@ mod platform;
 use eframe::egui::containers::menu::{MenuButton, MenuConfig};
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Painter, Rect, RichText, Shape, Stroke, StrokeKind, ThemePreference, pos2, vec2};
 use sample::{Info, Sample, Sampler};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use theme::Tokens;
@@ -23,8 +23,8 @@ const ROW_HEIGHT: f32 = 34.0;
 const ROW_GAP: f32 = 6.0;
 /// Window margins plus the header line, used to size the window in minimal mode.
 const CHROME_HEIGHT: f32 = 12.0 + 30.0 + 12.0;
-/// CPU, Memory, GPU, Network, Disk activity, Temperature.
-const BLOCKS: usize = 6;
+/// CPU, Memory, GPU, Network, Disk activity, Temperature, Fans.
+const BLOCKS: usize = 7;
 
 /// Window height that fits `rows` minimal-mode rows exactly.
 fn minimal_height(rows: usize) -> f32 {
@@ -64,6 +64,10 @@ struct App {
     /// Last window geometry eframe saved while the window was not minimized.
     window: Option<String>,
     always_on_top: bool,
+    /// Set once the window height has been checked against the minimal-mode rows.
+    fitted: bool,
+    /// Names the user gave the fans, keyed by the name Vitals shows by default.
+    fan_labels: HashMap<String, String>,
 }
 
 fn set_always_on_top(ctx: &egui::Context, on: bool) {
@@ -123,7 +127,11 @@ impl App {
                 repaint.request_repaint();
             }
         });
-        Self { state, logo, minimal, full_size, autostart, window: saved("window"), always_on_top }
+        // Saved as one "default name<TAB>user's name" per line.
+        let fan_labels = saved("fan_names")
+            .map(|s| s.lines().filter_map(|l| l.split_once('\t')).map(|(a, b)| (a.to_string(), b.to_string())).collect())
+            .unwrap_or_default();
+        Self { state, logo, minimal, full_size, autostart, window: saved("window"), always_on_top, fitted: false, fan_labels }
     }
 
     /// Switches mode and resizes the window: minimal fits its rows exactly,
@@ -165,6 +173,28 @@ impl App {
             if ui.add_enabled(state.is_some(), egui::Checkbox::new(&mut on, "Start at sign-in")).changed() {
                 refresh_autostart(&self.autostart, ui.ctx(), Some(on));
             }
+
+            // Which header a fan input is wired to differs per board, so each fan can be renamed.
+            let defaults = self.state.lock().unwrap().info.fan_names.clone();
+            if !defaults.is_empty() {
+                ui.separator();
+                ui.label(RichText::new("Fan names").size(12.0).weak());
+                egui::Grid::new("fan_names").num_columns(2).show(ui, |ui| {
+                    for default in defaults {
+                        ui.label(RichText::new(&default).size(12.0).weak());
+                        let mut name = self.fan_labels.get(&default).cloned().unwrap_or_default();
+                        let edit = egui::TextEdit::singleline(&mut name).hint_text(&default).desired_width(110.0).char_limit(12);
+                        if ui.add(edit).changed() {
+                            if name.trim().is_empty() {
+                                self.fan_labels.remove(&default);
+                            } else {
+                                self.fan_labels.insert(default, name);
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+            }
         });
         // Read when the menu opens, so a change made elsewhere (the first-run offer, Task Scheduler) shows.
         if gear.clicked() {
@@ -194,6 +224,8 @@ impl eframe::App for App {
         }
         storage.set_string("minimal", self.minimal.to_string());
         storage.set_string("always_on_top", self.always_on_top.to_string());
+        let labels: Vec<String> = self.fan_labels.iter().map(|(default, name)| format!("{default}\t{name}")).collect();
+        storage.set_string("fan_names", labels.join("\n"));
         if let Some(size) = self.full_size {
             storage.set_string("full_size", format!("{} {}", size.x, size.y));
         }
@@ -201,8 +233,19 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let t = theme::tokens(ui.visuals().dark_mode);
-        let view = view(&self.state.lock().unwrap(), t);
+        let view = view(&self.state.lock().unwrap(), t, &self.fan_labels);
         let mut toggle = false;
+
+        // Minimal mode fits its rows: a window saved with fewer blocks (an older version) grows once.
+        if self.minimal && !self.fitted {
+            if let Some(rect) = ui.ctx().input(|i| i.viewport().inner_rect) {
+                self.fitted = true;
+                let height = minimal_height(view.len());
+                if (rect.height() - height).abs() > 1.0 {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(rect.width(), height)));
+                }
+            }
+        }
 
         let frame = egui::Frame::new().fill(t.bg).inner_margin(12);
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
@@ -287,7 +330,7 @@ fn series(label: impl Into<String>, color: Color32, values: Vec<f32>, text: Stri
 }
 
 /// The blocks in display order.
-fn view(state: &State, t: &Tokens) -> Vec<Chart> {
+fn view(state: &State, t: &Tokens, fan_labels: &HashMap<String, String>) -> Vec<Chart> {
     let (info, s) = (&state.info, &state.samples);
     let last = s.back();
     let col = |f: &dyn Fn(&Sample) -> f32| s.iter().map(f).collect::<Vec<f32>>();
@@ -323,10 +366,25 @@ fn view(state: &State, t: &Tokens) -> Vec<Chart> {
         })
         .collect();
 
+    // Every fan in RPM, against the fastest one seen in the history.
+    let fan_max = s.iter().flat_map(|x| x.fans.iter().copied()).filter(|v| v.is_finite()).fold(1000.0, f32::max) * 1.15;
+    let mut fans: Vec<Series> = info
+        .fan_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let at = move |x: &Sample| x.fans.get(i).copied().unwrap_or(f32::NAN);
+            let v = last.map_or(f32::NAN, at);
+            let text = if v.is_finite() { format!("{v:.0}") } else { "n/a".into() };
+            let label = fan_labels.get(name).unwrap_or(name);
+            series(label.as_str(), palette[i % palette.len()], col(&at), text)
+        })
+        .collect();
+    if !info.fan_hint.is_empty() {
+        fans.insert(0, series("Board", t.muted, Vec::new(), info.fan_hint.into()));
+    }
+
     let ghz = last.map(|x| x.cpu_ghz).filter(|v| v.is_finite() && *v > 0.0).map(|v| format!("{v:.2} GHz"));
-    let fan = last.map(|x| x.gpu.fan_rpm).filter(|v| v.is_finite()).map(|rpm| {
-        if rpm < 1.0 { "GPU fan off".to_string() } else { format!("GPU fan {rpm:.0} rpm") }
-    });
     // RAM line and value turn amber from 80% used and red from 90%.
     let used = last.map_or(f64::NAN, |x| x.mem_used);
     let share = used / mem_total;
@@ -378,7 +436,9 @@ fn view(state: &State, t: &Tokens) -> Vec<Chart> {
             ],
         },
         Chart { title: "Disk activity".into(), subtitle: None, max: 100.0, scale: None, series: disks },
-        Chart { title: "Temperature".into(), subtitle: fan, max: 100.0, scale: Some("100°C".into()), series: temps },
+        Chart { title: "Temperature".into(), subtitle: None, max: 100.0, scale: Some("100°C".into()), series: temps },
+        // RPM; the unit is on the graph scale only, so the legend has room for four or five fans.
+        Chart { title: "Fans".into(), subtitle: None, max: fan_max, scale: Some(format!("{fan_max:.0} rpm")), series: fans },
     ]
 }
 

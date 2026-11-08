@@ -24,14 +24,16 @@
 | GPU | Load, VRAM |
 | Network | Download, upload on physical adapters only, so VPN and virtual adapter traffic is not counted twice |
 | Disk activity | Share of time each physical disk is busy (Task Manager's "active time") |
-| Temperature | CPU and GPU, plus the GPU fan speed. CPU turns amber at 90 °C and red at 95 °C (Ryzen 7000 runs at 95 °C by design), GPU at 80 °C and 90 °C |
+| Temperature | CPU and GPU. CPU turns amber at 90 °C and red at 95 °C (Ryzen 7000 runs at 95 °C by design), GPU at 80 °C and 90 °C |
+| Fans | Speed in RPM of each motherboard fan spinning when Vitals starts (CPU, pump, case), plus the GPU fan. Each fan can be renamed in the settings |
 
-It samples once per second. The window shows one column when narrow and two when wide, and remembers its size and position. It starts in **minimal mode**: one line of values per block, in a window sized to fit. The chart icon next to the version shows the graphs, and the rows icon goes back. The mode is remembered. Everything except the Windows CPU temperature works without a driver or admin rights.
+It samples once per second. The window shows one column when narrow and two when wide, and remembers its size and position. It starts in **minimal mode**: one line of values per block, in a window sized to fit. The chart icon next to the version shows the graphs, and the rows icon goes back. The mode is remembered. Everything except the Windows CPU temperature and motherboard fans works without a driver or admin rights.
 
 The gear icon next to it opens the settings:
 
 - **Theme**: System (the default, follows the OS), Light or Dark.
 - **Always on top**: keeps the window above other windows. Remembered.
+- **Fan names**: a name for each fan in the Fans block. Leave a field empty to go back to the default name.
 - **Start at sign-in**: on Windows, a Task Scheduler task named `Vitals` that starts it with administrator rights (see below); changing it from a Vitals that is not running as administrator asks for a UAC confirmation. On Linux, an entry in `~/.config/autostart`. On macOS, a LaunchAgent in `~/Library/LaunchAgents`. It always starts the copy of Vitals you set it from, so set it again after moving the app.
 
 ## What each OS can show
@@ -46,21 +48,25 @@ The gear icon next to it opens the settings:
 | GPU load, VRAM | Yes, any vendor | AMD only (amdgpu) | Yes; memory shown against RAM, which the GPU shares |
 | GPU temperature | Yes, same source as Task Manager | AMD only | No public API |
 | GPU fan | When the driver reports it | AMD only | No |
+| Motherboard fans | Nuvoton NCT6796D-S / NCT6799D chips, with PawnIO and admin rights (see below) | Yes, every chip with a kernel driver (nct6775, it87...) | No |
 | CPU temperature | AMD Ryzen, with PawnIO and admin rights (see below) | Yes (k10temp, coretemp) | Apple silicon die sensors |
 
 Where a value is not available, the legend shows `n/a`.
 
-## CPU temperature on Windows
+## CPU temperature and fans on Windows
 
-Windows has no way to read an AMD CPU temperature without a kernel driver. Vitals bundles [PawnIO](https://pawnio.eu), the Microsoft-signed driver LibreHardwareMonitor also uses, which only runs signed, purpose-built modules.
+Windows has no way to read an AMD CPU temperature or the motherboard's fans without a kernel driver. Vitals bundles [PawnIO](https://pawnio.eu), the Microsoft-signed driver LibreHardwareMonitor also uses, which only runs signed, purpose-built modules.
 
 1. Right-click `vitals-windows-x64.exe`, then **Run as administrator**. The PawnIO device only accepts administrators.
-2. The first time, Vitals asks whether to install the bundled PawnIO 2.2.0 driver. Accept, and the CPU temperature appears.
+2. The first time, Vitals asks whether to install the bundled PawnIO 2.2.0 driver. Accept, and the CPU temperature and fans appear.
 3. It then offers to start when you sign in, with administrator rights and no UAC prompt. This is the **Start at sign-in** setting (gear icon), where you can turn it off again.
 
-Without admin rights the legend shows `run as admin` and everything else works as usual. On an unsupported CPU it shows `AMD only`.
+Without admin rights the legend shows `run as admin` and everything else works as usual, the GPU fan included. On an unsupported CPU the CPU temperature shows `AMD only`; on an unsupported fan chip the board fans show `n/a`.
 
-Supported: AMD Ryzen and EPYC from Zen to Zen 5 (families 17h to 1Ah). Not yet: Intel. Tested on a Ryzen 9 7950X with Memory Integrity on. Bundled file versions and licenses are listed in [`assets/pawnio`](assets/pawnio/README.md).
+- CPU temperature: AMD Ryzen and EPYC from Zen to Zen 5 (families 17h to 1Ah). Not yet: Intel. Tested on a Ryzen 9 7950X with Memory Integrity on.
+- Motherboard fans: boards with a Nuvoton NCT6796D-S or NCT6799D Super I/O chip, common on AMD AM5 boards. The chip only numbers its fan inputs, and which input goes to which header differs per board. Vitals names them after ASRock's B650M layout (CPU 1, CPU 2, Chassis 1 to 3; checked on a B650M PG Riptide); on another board, rename them in the settings. Only fans spinning when Vitals starts are listed.
+
+Bundled file versions and licenses are listed in [`assets/pawnio`](assets/pawnio/README.md).
 
 ## Download and run
 

@@ -32,6 +32,9 @@ pub struct Platform {
     disk_prev: Vec<f64>,
     disk_at: Instant,
     networks: Option<Networks>,
+    /// Mac fans are only exposed through the private SMC interface, not read here.
+    pub fan_names: Vec<String>,
+    pub fan_hint: &'static str,
 }
 
 impl Platform {
@@ -52,7 +55,13 @@ impl Platform {
             disk_prev,
             disk_at: Instant::now(),
             networks: Networks::new_with_refreshed_list().ok(),
+            fan_names: Vec::new(),
+            fan_hint: "",
         }
+    }
+
+    pub fn board_fans(&mut self) -> Vec<f32> {
+        Vec::new()
     }
 
     pub fn net_totals(&mut self) -> (u64, u64) {

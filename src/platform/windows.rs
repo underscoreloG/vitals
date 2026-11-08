@@ -62,6 +62,11 @@ pub struct Platform {
     engines: PDH_HCOUNTER,
     vram: PDH_HCOUNTER,
     dgpu: Option<Adapter>,
+    /// Motherboard fans; the graphics card's fan comes with `gpu()`.
+    pub fan_names: Vec<String>,
+    /// Legend text while the board's fans cannot be read.
+    pub fan_hint: &'static str,
+    super_io: Option<SuperIo>,
 }
 
 impl Platform {
@@ -98,12 +103,23 @@ impl Platform {
         let mut disk_keys: Vec<String> =
             counter_items(disk_idle).into_iter().map(|(name, _)| name).filter(|n| n != "_total").collect();
         disk_keys.sort_by_key(|k| disk_label(k));
-        let (pawnio, cpu_temp_hint) = match PawnIo::open() {
-            Ok(p) => {
-                offer_autostart();
-                (Some(p), "n/a")
-            }
-            Err(hint) => (None, hint),
+        // The CPU temperature and the board's fans need PawnIO, so administrator rights.
+        // Only AMD Zen users are offered to install it, as the CPU temperature needs it there.
+        let lib = PawnLib::load(is_amd_zen());
+        if lib.is_ok() {
+            offer_autostart();
+        }
+        let (pawnio, cpu_temp_hint) = match &lib {
+            _ if !is_amd_zen() => (None, "AMD only"),
+            Ok(lib) => (PawnIo::open(lib), "n/a"),
+            Err(hint) => (None, *hint),
+        };
+        let (super_io, fan_names, fan_hint) = match &lib {
+            Ok(lib) => match SuperIo::open(lib) {
+                Some((chip, names)) => (Some(chip), names, ""),
+                None => (None, Vec::new(), "n/a"),
+            },
+            Err(hint) => (None, Vec::new(), *hint),
         };
 
         Self {
@@ -124,7 +140,15 @@ impl Platform {
             engines,
             vram,
             dgpu,
+            fan_names,
+            fan_hint,
+            super_io,
         }
+    }
+
+    /// RPM of each fan in `fan_names`.
+    pub fn board_fans(&mut self) -> Vec<f32> {
+        self.super_io.as_ref().map_or_else(Vec::new, |chip| chip.fans(10))
     }
 
     /// Current CPU clock in GHz, as Task Manager computes it.
@@ -198,26 +222,23 @@ impl Platform {
 
 const PAWNIO_SETUP: &[u8] = include_bytes!("../../assets/pawnio/PawnIO_setup.exe");
 const AMD_MODULE: &[u8] = include_bytes!("../../assets/pawnio/AMDFamily17.bin");
+const LPC_MODULE: &[u8] = include_bytes!("../../assets/pawnio/LpcIO.bin");
 
 type PawnOpen = unsafe extern "system" fn(*mut HANDLE) -> i32;
 type PawnLoad = unsafe extern "system" fn(HANDLE, *const u8, usize) -> i32;
 type PawnExecute = unsafe extern "system" fn(HANDLE, *const u8, *const u64, usize, *mut u64, usize, *mut usize) -> i32;
 
-/// AMD Zen (family 17h to 1Ah) CPU temperature through PawnIO's AMDFamily17 module.
-struct PawnIo {
-    handle: HANDLE,
+/// PawnIOLib.dll, which talks to the PawnIO driver.
+struct PawnLib {
+    open: PawnOpen,
+    load: PawnLoad,
     execute: PawnExecute,
-    /// Hardware tools share the PCI index/data registers through this named mutex.
-    pci_mutex: HANDLE,
 }
 
-impl PawnIo {
+impl PawnLib {
     /// Err carries the legend hint. The PawnIO device only accepts administrators,
     /// so an elevated Vitals offers to install the bundled driver when it is missing.
-    fn open() -> Result<Self, &'static str> {
-        if !is_amd_zen() {
-            return Err("AMD only");
-        }
+    fn load(offer_install: bool) -> Result<Self, &'static str> {
         if !unsafe { IsUserAnAdmin() }.as_bool() {
             return Err("run as admin");
         }
@@ -225,7 +246,7 @@ impl PawnIo {
         let path = HSTRING::from(format!("{dir}\\PawnIO\\PawnIOLib.dll"));
         let lib = match unsafe { LoadLibraryW(&path) } {
             Ok(lib) => lib,
-            Err(_) if ask_install() => {
+            Err(_) if offer_install && ask_install() => {
                 install_pawnio();
                 unsafe { LoadLibraryW(&path) }.map_err(|_| "no driver")?
             }
@@ -236,39 +257,167 @@ impl PawnIo {
         }) else {
             return Err("n/a");
         };
-        let (open, load, execute): (PawnOpen, PawnLoad, PawnExecute) =
-            unsafe { (std::mem::transmute(open), std::mem::transmute(load), std::mem::transmute(execute)) };
+        Ok(unsafe { Self { open: std::mem::transmute(open), load: std::mem::transmute(load), execute: std::mem::transmute(execute) } })
+    }
 
+    /// A PawnIO handle running one of the bundled modules.
+    fn module(&self, code: &[u8]) -> Option<Module> {
         let mut handle = HANDLE::default();
-        if unsafe { open(&mut handle) } < 0 {
-            return Err("n/a");
-        }
-        if unsafe { load(handle, AMD_MODULE.as_ptr(), AMD_MODULE.len()) } < 0 {
-            return Err("n/a");
-        }
-        let pci_mutex = unsafe { CreateMutexW(None, false, w!("Global\\Access_PCI")) }.map_err(|_| "n/a")?;
-        Ok(Self { handle, execute, pci_mutex })
+        (unsafe { (self.open)(&mut handle) } >= 0 && unsafe { (self.load)(handle, code.as_ptr(), code.len()) } >= 0)
+            .then_some(Module { handle, execute: self.execute })
+    }
+}
+
+struct Module {
+    handle: HANDLE,
+    execute: PawnExecute,
+}
+
+impl Module {
+    /// Runs a module function that returns N values; None when PawnIO reports an error.
+    fn call<const N: usize>(&self, name: &std::ffi::CStr, input: &[u64]) -> Option<[u64; N]> {
+        let (mut out, mut written) = ([0u64; N], 0usize);
+        let hr = unsafe { (self.execute)(self.handle, name.as_ptr().cast(), input.as_ptr(), input.len(), out.as_mut_ptr(), N, &mut written) };
+        (hr >= 0).then_some(out)
+    }
+}
+
+/// Runs `f` while holding a named mutex that hardware tools share; None if it stays busy.
+fn locked<T>(mutex: HANDLE, ms: u32, f: impl FnOnce() -> T) -> Option<T> {
+    let wait = unsafe { WaitForSingleObject(mutex, ms) };
+    if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
+        return None;
+    }
+    let out = f();
+    let _ = unsafe { ReleaseMutex(mutex) };
+    Some(out)
+}
+
+/// AMD Zen (family 17h to 1Ah) CPU temperature through PawnIO's AMDFamily17 module.
+struct PawnIo {
+    module: Module,
+    /// Hardware tools share the PCI index/data registers through this named mutex.
+    pci_mutex: HANDLE,
+}
+
+impl PawnIo {
+    fn open(lib: &PawnLib) -> Option<Self> {
+        let module = lib.module(AMD_MODULE)?;
+        let pci_mutex = unsafe { CreateMutexW(None, false, w!("Global\\Access_PCI")) }.ok()?;
+        Some(Self { module, pci_mutex })
     }
 
     /// Tctl in degrees C, from SMN register THM_TCON_CUR_TMP (0x59800).
     fn tctl(&self) -> f32 {
-        let (input, mut output, mut written) = ([0x0005_9800u64], [0u64], 0usize);
-        unsafe {
-            let wait = WaitForSingleObject(self.pci_mutex, 100);
-            if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
-                return f32::NAN;
-            }
-            let hr = (self.execute)(self.handle, c"ioctl_read_smn".as_ptr().cast(), input.as_ptr(), 1, output.as_mut_ptr(), 1, &mut written);
-            let _ = ReleaseMutex(self.pci_mutex);
-            if hr < 0 {
-                return f32::NAN;
-            }
-        }
-        let raw = output[0] as u32;
+        let Some(Some([raw])) = locked(self.pci_mutex, 100, || self.module.call::<1>(c"ioctl_read_smn", &[0x0005_9800])) else {
+            return f32::NAN;
+        };
+        let raw = raw as u32;
         let t = ((raw >> 21) & 0x7FF) as f32 * 0.125;
         // Range select (bit 19), or both TJ_SEL bits (17:16), shift the scale by 49 C.
         if raw & 0x8_0000 != 0 || raw & 0x3_0000 == 0x3_0000 { t - 49.0 } else { t }
     }
+}
+
+/// Fan count registers of the Nuvoton NCT6796D-S / NCT6799D (LibreHardwareMonitor's Nct677X).
+const FAN_COUNT: [u16; 7] = [0x4B0, 0x4B2, 0x4B4, 0x4B6, 0x4B8, 0x4BA, 0x4CC];
+
+/// Motherboard fans from a Nuvoton NCT6796D-S / NCT6799D Super I/O chip, through
+/// PawnIO's LpcIO module, which only opens the Super I/O ports.
+struct SuperIo {
+    module: Module,
+    /// Hardware tools share the Super I/O ports through this named mutex.
+    isa_mutex: HANDLE,
+    /// Hardware monitor I/O base: index port at +5, data port at +6.
+    base: u64,
+    /// Fan inputs (0-based) to read: the ones spinning at startup.
+    inputs: Vec<usize>,
+}
+
+impl SuperIo {
+    /// The chip and the names of its spinning fans, or None for another chip.
+    fn open(lib: &PawnLib) -> Option<(Self, Vec<String>)> {
+        let module = lib.module(LPC_MODULE)?;
+        let isa_mutex = unsafe { CreateMutexW(None, false, w!("Global\\Access_ISABUS.HTP.Method")) }.ok()?;
+        let base = locked(isa_mutex, 100, || (0..2).find_map(|slot| hardware_monitor_base(&module, slot)))??;
+        let mut chip = Self { module, isa_mutex, base, inputs: (0..FAN_COUNT.len()).collect() };
+        // Nuvoton's vendor ID, high byte in bank 0x80, low byte in bank 0.
+        let vendor = locked(isa_mutex, 100, || Some((chip.reg(0x804F)? as u16) << 8 | chip.reg(0x004F)? as u16))?;
+        if vendor != Some(0x5CA3) {
+            return None;
+        }
+        // Waits longer than a normal tick: another tool holding the ports must not hide every fan.
+        let rpm = chip.fans(100);
+        chip.inputs = (0..rpm.len()).filter(|&i| rpm[i] > 0.0).collect();
+        // Listed by name, so CPU 1 comes before CPU 2.
+        chip.inputs.sort_by_key(|&i| FAN_NAMES[i]);
+        let names = chip.inputs.iter().map(|&i| FAN_NAMES[i].to_string()).collect();
+        Some((chip, names))
+    }
+
+    /// One hardware monitor register: bank in the high byte, register in the low byte.
+    fn reg(&self, addr: u16) -> Option<u8> {
+        let (index, data) = (self.base + 5, self.base + 6);
+        self.module.call::<0>(c"ioctl_pio_outb", &[index, 0x4E])?;
+        self.module.call::<0>(c"ioctl_pio_outb", &[data, (addr >> 8) as u64])?;
+        self.module.call::<0>(c"ioctl_pio_outb", &[index, (addr & 0xFF) as u64])?;
+        Some(self.module.call::<1>(c"ioctl_pio_inb", &[data])?[0] as u8)
+    }
+
+    /// RPM of each input in `inputs`; 0 is a stopped fan.
+    fn fans(&self, wait_ms: u32) -> Vec<f32> {
+        let read = || {
+            self.inputs
+                .iter()
+                .map(|&i| {
+                    let (Some(high), Some(low)) = (self.reg(FAN_COUNT[i]), self.reg(FAN_COUNT[i] + 1)) else { return f32::NAN };
+                    let count = (high as u32) << 5 | (low as u32 & 0x1F);
+                    if count >= 0x1FFF { 0.0 } else if count < 0x15 { f32::NAN } else { 1_350_000.0 / count as f32 }
+                })
+                .collect()
+        };
+        locked(self.isa_mutex, wait_ms, read).unwrap_or_else(|| vec![f32::NAN; self.inputs.len()])
+    }
+}
+
+/// Default name of each chip fan input, for every board. The wiring differs per board;
+/// this is ASRock's B650M layout (B650M PG Riptide checked against HWiNFO, B650M-C from
+/// LibreHardwareMonitor). Other boards may differ, so the user can rename each fan.
+const FAN_NAMES: [&str; 7] = ["CPU 2", "CPU 1", "Fan 3", "Chassis 1", "Chassis 2", "Fan 6", "Chassis 3"];
+
+/// Looks for an NCT6796D-S / NCT6799D (chip ID 0xD800 to 0xD807, as Linux's nct6775 driver
+/// matches it) at config port 0x2E (slot 0) or 0x4E (slot 1); returns its hardware monitor base.
+fn hardware_monitor_base(m: &Module, slot: u64) -> Option<u64> {
+    let port = [0x2E, 0x4E][slot as usize];
+    m.call::<0>(c"ioctl_select_slot", &[slot])?;
+    // Enter the extended function mode.
+    m.call::<0>(c"ioctl_pio_outb", &[port, 0x87])?;
+    m.call::<0>(c"ioctl_pio_outb", &[port, 0x87])?;
+    let id = m.call::<1>(c"ioctl_superio_inb", &[0x20]).zip(m.call::<1>(c"ioctl_superio_inb", &[0x21]));
+    let base = match id {
+        Some(([0xD8], [rev])) if rev & 0xF8 == 0 => {
+            // Lets the module reach the chip's I/O ranges, then selects logical device 0x0B (hardware monitor).
+            m.call::<0>(c"ioctl_find_bars", &[]);
+            m.call::<0>(c"ioctl_superio_outb", &[0x07, 0x0B]);
+            let first = m.call::<1>(c"ioctl_superio_inw", &[0x60]);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            let second = m.call::<1>(c"ioctl_superio_inw", &[0x60]);
+            // Bit 4 of register 0x28 locks the hardware monitor's I/O space.
+            if let Some([options]) = m.call::<1>(c"ioctl_superio_inb", &[0x28]).filter(|[o]| o & 0x10 != 0) {
+                m.call::<0>(c"ioctl_superio_outb", &[0x28, options & !0x10]);
+            }
+            match (first, second) {
+                (Some([a]), Some([b])) if a == b => {
+                    let a = if a & 7 == 5 { a & 0xFFF8 } else { a };
+                    (a >= 0x100 && a & 0xF007 == 0).then_some(a)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    m.call::<0>(c"ioctl_pio_outb", &[port, 0xAA]);
+    base
 }
 
 /// AMD family 17h to 1Ah (Zen to Zen 5), the CPUs the AMDFamily17 module supports.
@@ -283,7 +432,7 @@ fn is_amd_zen() -> bool {
 }
 
 fn ask_install() -> bool {
-    let text = w!("Vitals reads the CPU temperature through the PawnIO driver, which is bundled with it. PawnIO is signed by Microsoft and also used by LibreHardwareMonitor.\n\nInstall PawnIO now?");
+    let text = w!("Vitals reads the CPU temperature and the fan speeds through the PawnIO driver, which is bundled with it. PawnIO is signed by Microsoft and also used by LibreHardwareMonitor.\n\nInstall PawnIO now?");
     ask(text)
 }
 

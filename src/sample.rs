@@ -27,6 +27,8 @@ pub struct Sample {
     pub gpu: Gpu,
     /// Active time % per disk, in the order of `Info::disk_names`.
     pub disks: Vec<f32>,
+    /// RPM per fan, in the order of `Info::fan_names`: the board's fans, then the GPU's.
+    pub fans: Vec<f32>,
 }
 
 #[derive(Clone, Default)]
@@ -39,6 +41,9 @@ pub struct Info {
     pub disk_names: Vec<String>,
     /// Legend text while there is no CPU temperature, such as "run as admin".
     pub cpu_temp_hint: &'static str,
+    pub fan_names: Vec<String>,
+    /// Legend text while the board's fans cannot be read, such as "run as admin".
+    pub fan_hint: &'static str,
 }
 
 pub struct Sampler {
@@ -65,6 +70,8 @@ impl Sampler {
             vram_total: platform.vram_total,
             disk_names: platform.disk_names.clone(),
             cpu_temp_hint: platform.cpu_temp_hint,
+            fan_names: platform.fan_names.iter().cloned().chain(["GPU".to_string()]).collect(),
+            fan_hint: platform.fan_hint,
         };
         Self {
             info,
@@ -87,6 +94,9 @@ impl Sampler {
         let (down, up) = (net.0.saturating_sub(self.net_prev.0), net.1.saturating_sub(self.net_prev.1));
         self.net_prev = net;
 
+        let gpu = self.platform.gpu();
+        let mut fans = self.platform.board_fans();
+        fans.push(gpu.fan_rpm);
         Sample {
             cpu: self.sys.global_cpu_usage(),
             top_core: self.sys.cpus().iter().map(|c| c.usage()).fold(0.0, f32::max),
@@ -95,8 +105,9 @@ impl Sampler {
             mem_used: self.sys.used_memory() as f64,
             net_down: down as f64 / secs,
             net_up: up as f64 / secs,
-            gpu: self.platform.gpu(),
+            gpu,
             disks: self.platform.disks(),
+            fans,
         }
     }
 
