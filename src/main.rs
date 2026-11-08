@@ -504,11 +504,36 @@ fn rate(bytes: f64) -> String {
 fn header(p: &Painter, rect: Rect, chart: &Chart, t: &Tokens) {
     p.rect(rect, CornerRadius::same(12), t.elevated, Stroke::new(1.0, t.border), StrokeKind::Inside);
 
-    // Legend, right-aligned: dot, label, current value, with a | between items.
+    // Legend, right-aligned: dot, label, current value, with a | between items. The title may be
+    // clipped but keeps up to 30 px; items that still do not fit (many disks) count as "+N".
+    let width = |text: &str, font: FontId| p.layout_no_wrap(text.to_string(), font, t.fg).size().x;
+    let bar = width("|", FontId::proportional(12.0)) + 10.0;
+    // Values count as at least 3 characters, so a percentage going from 9% to 10% does not change the count.
+    let min_value = width("00%", FontId::monospace(12.0));
+    let items: Vec<f32> = chart
+        .series
+        .iter()
+        .map(|s| width(&s.text, FontId::monospace(12.0)).max(min_value) + 5.0 + width(&s.label, FontId::proportional(12.0)) + 21.0)
+        .collect();
+    // The title is clipped 10 px into the legend's last gap, hence 24 - 10.
+    let budget = rect.width() - 14.0 - width(&chart.title, FontId::proportional(14.0)).min(30.0);
+    let needed = |shown: usize| {
+        let more = if shown < items.len() { width(&format!("+{}", items.len() - shown), FontId::proportional(12.0)) + 10.0 + bar } else { 0.0 };
+        items[..shown].iter().sum::<f32>() + bar * shown.saturating_sub(1) as f32 + more
+    };
+    let mut shown = items.len();
+    while shown > 1 && needed(shown) > budget {
+        shown -= 1;
+    }
+
     let mut x = rect.right() - 12.0;
     let y = rect.top() + 11.0;
-    for (i, s) in chart.series.iter().rev().enumerate() {
-        if i > 0 {
+    if shown < items.len() {
+        let more = format!("+{}", items.len() - shown);
+        x = p.text(pos2(x, y), Align2::RIGHT_TOP, more, FontId::proportional(12.0), t.muted).left() - 10.0;
+    }
+    for (i, s) in chart.series[..shown].iter().rev().enumerate() {
+        if i > 0 || shown < items.len() {
             x = p.text(pos2(x, y), Align2::RIGHT_TOP, "|", FontId::proportional(12.0), t.muted).left() - 10.0;
         }
         let value = p.text(pos2(x, y), Align2::RIGHT_TOP, &s.text, FontId::monospace(12.0), s.text_color.unwrap_or(t.fg));
