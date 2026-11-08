@@ -33,7 +33,8 @@ The gear icon next to it opens the settings:
 
 - **Theme**: System (the default, follows the OS), Light or Dark.
 - **Always on top**: keeps the window above other windows. Remembered.
-- **Fan names**: a name for each fan in the Fans block. Leave a field empty to go back to the default name.
+- **Blocks**: which blocks to show, at least one. In minimal mode the window fits the blocks shown. Remembered.
+- **Fan names**: a name for each fan in the Fans block, shown while that block is on. Leave a field empty to go back to the default name.
 - **Start at sign-in**: on Windows, a Task Scheduler task named `Vitals` that starts it with administrator rights (see below); changing it from a Vitals that is not running as administrator asks for a UAC confirmation. On Linux, an entry in `~/.config/autostart`. On macOS, a LaunchAgent in `~/Library/LaunchAgents`. It always starts the copy of Vitals you set it from, so set it again after moving the app.
 
 ## What each OS can show

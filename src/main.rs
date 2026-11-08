@@ -7,10 +7,9 @@ mod theme;
 #[cfg_attr(target_os = "macos", path = "platform/macos.rs")]
 mod platform;
 
-use eframe::egui::containers::menu::{MenuButton, MenuConfig};
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Painter, Rect, RichText, Shape, Stroke, StrokeKind, ThemePreference, pos2, vec2};
 use sample::{Info, Sample, Sampler};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use theme::Tokens;
@@ -38,7 +37,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             // First launch opens in minimal mode, sized to its rows.
             .with_inner_size([460.0, minimal_height(BLOCKS)])
-            .with_min_inner_size([320.0, 240.0])
+            // Low enough for minimal mode with a single block.
+            .with_min_inner_size([320.0, minimal_height(1)])
             .with_icon(Arc::new(icon)),
         // Reopens with the last window size and position.
         persist_window: true,
@@ -64,10 +64,15 @@ struct App {
     /// Last window geometry eframe saved while the window was not minimized.
     window: Option<String>,
     always_on_top: bool,
-    /// Set once the window height has been checked against the minimal-mode rows.
-    fitted: bool,
+    /// Window height minimal mode last fitted to; it refits only when the rows or the open menu
+    /// need another height, so a height the user drags to stays until then.
+    fitted: Option<f32>,
+    /// Where the window must end to show the open settings menu; None while it is closed.
+    menu_bottom: Option<f32>,
     /// Names the user gave the fans, keyed by the name Vitals shows by default.
     fan_labels: HashMap<String, String>,
+    /// Blocks turned off in the settings, by name.
+    hidden: HashSet<String>,
 }
 
 fn set_always_on_top(ctx: &egui::Context, on: bool) {
@@ -131,7 +136,9 @@ impl App {
         let fan_labels = saved("fan_names")
             .map(|s| s.lines().filter_map(|l| l.split_once('\t')).map(|(a, b)| (a.to_string(), b.to_string())).collect())
             .unwrap_or_default();
-        Self { state, logo, minimal, full_size, autostart, window: saved("window"), always_on_top, fitted: false, fan_labels }
+        // Saved as one block name per line.
+        let hidden = saved("hidden_blocks").map(|s| s.lines().map(String::from).collect()).unwrap_or_default();
+        Self { state, logo, minimal, full_size, autostart, window: saved("window"), always_on_top, fitted: None, menu_bottom: None, fan_labels, hidden }
     }
 
     /// Switches mode and resizes the window: minimal fits its rows exactly,
@@ -148,54 +155,82 @@ impl App {
         self.minimal = !self.minimal;
     }
 
-    /// Gear button with the theme choice, always on top and start at sign-in. egui saves the theme
-    /// with its own state and gives the window title bar the same theme.
-    fn settings(&mut self, ui: &mut egui::Ui) {
+    /// Gear button with the theme choice, always on top, start at sign-in, the blocks to show and
+    /// the fan names. egui saves the theme with its own state and gives the window title bar the same theme.
+    fn settings(&mut self, ui: &mut egui::Ui, blocks: &[&'static str]) {
         // Drawn by hand: the default fonts have no gear glyph.
-        let gear = egui::Button::new("").min_size(vec2(26.0, 24.0)).frame_when_inactive(false);
-        let config = MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-        let (gear, _) = MenuButton::from_button(gear).config(config).ui(ui, |ui| {
-            ui.label(RichText::new("Theme").size(12.0).weak());
-            ui.horizontal(|ui| {
-                let mut theme = ui.ctx().options(|o| o.theme_preference);
-                for (value, label) in [(ThemePreference::System, "System"), (ThemePreference::Light, "Light"), (ThemePreference::Dark, "Dark")] {
-                    if ui.selectable_value(&mut theme, value, label).clicked() {
-                        ui.ctx().set_theme(theme);
-                    }
-                }
-            });
-            ui.separator();
-            if ui.checkbox(&mut self.always_on_top, "Always on top").changed() {
-                set_always_on_top(ui.ctx(), self.always_on_top);
-            }
-            let state = *self.autostart.lock().unwrap();
-            let mut on = state.unwrap_or(false);
-            if ui.add_enabled(state.is_some(), egui::Checkbox::new(&mut on, "Start at sign-in")).changed() {
-                refresh_autostart(&self.autostart, ui.ctx(), Some(on));
-            }
-
-            // Which header a fan input is wired to differs per board, so each fan can be renamed.
-            let defaults = self.state.lock().unwrap().info.fan_names.clone();
-            if !defaults.is_empty() {
-                ui.separator();
-                ui.label(RichText::new("Fan names").size(12.0).weak());
-                egui::Grid::new("fan_names").num_columns(2).show(ui, |ui| {
-                    for default in defaults {
-                        ui.label(RichText::new(&default).size(12.0).weak());
-                        let mut name = self.fan_labels.get(&default).cloned().unwrap_or_default();
-                        let edit = egui::TextEdit::singleline(&mut name).hint_text(&default).desired_width(110.0).char_limit(12);
-                        if ui.add(edit).changed() {
-                            if name.trim().is_empty() {
-                                self.fan_labels.remove(&default);
-                            } else {
-                                self.fan_labels.insert(default, name);
-                            }
+        let gear = ui.add(egui::Button::new("").min_size(vec2(26.0, 24.0)).frame_when_inactive(false));
+        // Always opens below the gear, so it does not jump when the window height changes. It scrolls
+        // when the window is too short; in minimal mode the window grows to show it whole (see `ui`).
+        let max_height = ui.ctx().content_rect().bottom() - gear.rect.bottom() - 20.0;
+        let menu = egui::Popup::menu(&gear)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .align_alternatives(&[])
+            // The minimum too: egui lays the menu out in its last size, which would never grow back.
+            .show(|ui| egui::ScrollArea::vertical().max_height(max_height).min_scrolled_height(max_height).show(ui, |ui| {
+                ui.label(RichText::new("Theme").size(12.0).weak());
+                ui.horizontal(|ui| {
+                    let mut theme = ui.ctx().options(|o| o.theme_preference);
+                    for (value, label) in [(ThemePreference::System, "System"), (ThemePreference::Light, "Light"), (ThemePreference::Dark, "Dark")] {
+                        if ui.selectable_value(&mut theme, value, label).clicked() {
+                            ui.ctx().set_theme(theme);
                         }
-                        ui.end_row();
                     }
                 });
-            }
-        });
+                ui.separator();
+                if ui.checkbox(&mut self.always_on_top, "Always on top").changed() {
+                    set_always_on_top(ui.ctx(), self.always_on_top);
+                }
+                let state = *self.autostart.lock().unwrap();
+                let mut on = state.unwrap_or(false);
+                if ui.add_enabled(state.is_some(), egui::Checkbox::new(&mut on, "Start at sign-in")).changed() {
+                    refresh_autostart(&self.autostart, ui.ctx(), Some(on));
+                }
+
+                ui.separator();
+                ui.label(RichText::new("Blocks").size(12.0).weak());
+                let shown = blocks.iter().filter(|b| !self.hidden.contains(**b)).count();
+                egui::Grid::new("blocks").num_columns(2).show(ui, |ui| {
+                    for (i, block) in blocks.iter().enumerate() {
+                        let mut on = !self.hidden.contains(*block);
+                        // The last block shown stays on.
+                        if ui.add_enabled(!on || shown > 1, egui::Checkbox::new(&mut on, *block)).changed() {
+                            if on {
+                                self.hidden.remove(*block);
+                            } else {
+                                self.hidden.insert(block.to_string());
+                            }
+                        }
+                        if i % 2 == 1 {
+                            ui.end_row();
+                        }
+                    }
+                });
+
+                // Which header a fan input is wired to differs per board, so each fan can be renamed.
+                let defaults = self.state.lock().unwrap().info.fan_names.clone();
+                if !defaults.is_empty() && !self.hidden.contains("Fans") {
+                    ui.separator();
+                    ui.label(RichText::new("Fan names").size(12.0).weak());
+                    egui::Grid::new("fan_names").num_columns(2).show(ui, |ui| {
+                        for default in defaults {
+                            ui.label(RichText::new(&default).size(12.0).weak());
+                            let mut name = self.fan_labels.get(&default).cloned().unwrap_or_default();
+                            let edit = egui::TextEdit::singleline(&mut name).hint_text(&default).desired_width(110.0).char_limit(12);
+                            if ui.add(edit).changed() {
+                                if name.trim().is_empty() {
+                                    self.fan_labels.remove(&default);
+                                } else {
+                                    self.fan_labels.insert(default, name);
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+                }
+            }));
+        // Where the window must end to show the whole menu: its bottom plus whatever the scroll hides.
+        self.menu_bottom = menu.map(|m| m.response.rect.bottom() + (m.inner.content_size.y - m.inner.inner_rect.height()).max(0.0) + 8.0);
         // Read when the menu opens, so a change made elsewhere (the first-run offer, Task Scheduler) shows.
         if gear.clicked() {
             refresh_autostart(&self.autostart, ui.ctx(), None);
@@ -226,6 +261,9 @@ impl eframe::App for App {
         storage.set_string("always_on_top", self.always_on_top.to_string());
         let labels: Vec<String> = self.fan_labels.iter().map(|(default, name)| format!("{default}\t{name}")).collect();
         storage.set_string("fan_names", labels.join("\n"));
+        let mut hidden: Vec<&str> = self.hidden.iter().map(String::as_str).collect();
+        hidden.sort();
+        storage.set_string("hidden_blocks", hidden.join("\n"));
         if let Some(size) = self.full_size {
             storage.set_string("full_size", format!("{} {}", size.x, size.y));
         }
@@ -233,14 +271,20 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let t = theme::tokens(ui.visuals().dark_mode);
-        let view = view(&self.state.lock().unwrap(), t, &self.fan_labels);
+        let mut view = view(&self.state.lock().unwrap(), t, &self.fan_labels);
+        let blocks: Vec<&'static str> = view.iter().map(|chart| chart.name).collect();
+        // At least one block shows, even if a settings file hides them all.
+        if blocks.iter().any(|b| !self.hidden.contains(*b)) {
+            view.retain(|chart| !self.hidden.contains(chart.name));
+        }
         let mut toggle = false;
 
-        // Minimal mode fits its rows: a window saved with fewer blocks (an older version) grows once.
-        if self.minimal && !self.fitted {
+        // Minimal mode fits its rows (also when a window was saved with other blocks shown), and
+        // grows while the settings menu is open so the menu shows whole.
+        let height = minimal_height(view.len()).max(self.menu_bottom.unwrap_or(0.0));
+        if self.minimal && self.fitted != Some(height) {
             if let Some(rect) = ui.ctx().input(|i| i.viewport().inner_rect) {
-                self.fitted = true;
-                let height = minimal_height(view.len());
+                self.fitted = Some(height);
                 if (rect.height() - height).abs() > 1.0 {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(rect.width(), height)));
                 }
@@ -268,7 +312,7 @@ impl eframe::App for App {
                     }
                 }
                 toggle = button.on_hover_text(if self.minimal { "Show graphs" } else { "Values only" }).clicked();
-                self.settings(ui);
+                self.settings(ui, &blocks);
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
@@ -317,6 +361,8 @@ struct Series {
 }
 
 struct Chart {
+    /// Fixed name of the block, used in the settings; the CPU and GPU titles are the hardware names.
+    name: &'static str,
     title: String,
     /// Shown muted after the title, such as the RAM speed or the CPU clock.
     subtitle: Option<String>,
@@ -399,6 +445,7 @@ fn view(state: &State, t: &Tokens, fan_labels: &HashMap<String, String>) -> Vec<
 
     vec![
         Chart {
+            name: "CPU",
             title: if info.cpu_name.is_empty() { "CPU".into() } else { info.cpu_name.clone() },
             subtitle: ghz,
             max: 100.0,
@@ -408,8 +455,9 @@ fn view(state: &State, t: &Tokens, fan_labels: &HashMap<String, String>) -> Vec<
                 series("Top core", t.warning, col(&|x| x.top_core), pct(|x| x.top_core)),
             ],
         },
-        Chart { title: "Memory".into(), subtitle: info.mem_speed.clone(), max: 100.0, scale: None, series: vec![memory_series] },
+        Chart { name: "Memory", title: "Memory".into(), subtitle: info.mem_speed.clone(), max: 100.0, scale: None, series: vec![memory_series] },
         Chart {
+            name: "GPU",
             title: info.gpu_name.clone(),
             subtitle: None,
             max: 100.0,
@@ -426,6 +474,7 @@ fn view(state: &State, t: &Tokens, fan_labels: &HashMap<String, String>) -> Vec<
             ],
         },
         Chart {
+            name: "Network",
             title: "Network".into(),
             subtitle: None,
             max: net_max as f32,
@@ -435,10 +484,10 @@ fn view(state: &State, t: &Tokens, fan_labels: &HashMap<String, String>) -> Vec<
                 series("Up", t.warning, col(&|x| x.net_up as f32), last.map_or("n/a".into(), |x| rate(x.net_up))),
             ],
         },
-        Chart { title: "Disk activity".into(), subtitle: None, max: 100.0, scale: None, series: disks },
-        Chart { title: "Temperature".into(), subtitle: None, max: 100.0, scale: Some("100°C".into()), series: temps },
+        Chart { name: "Disk activity", title: "Disk activity".into(), subtitle: None, max: 100.0, scale: None, series: disks },
+        Chart { name: "Temperature", title: "Temperature".into(), subtitle: None, max: 100.0, scale: Some("100°C".into()), series: temps },
         // RPM; the unit is on the graph scale only, so the legend has room for four or five fans.
-        Chart { title: "Fans".into(), subtitle: None, max: fan_max, scale: Some(format!("{fan_max:.0} rpm")), series: fans },
+        Chart { name: "Fans", title: "Fans".into(), subtitle: None, max: fan_max, scale: Some(format!("{fan_max:.0} rpm")), series: fans },
     ]
 }
 
