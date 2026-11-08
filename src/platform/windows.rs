@@ -9,10 +9,10 @@ use std::ffi::c_void;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::SystemInformation::{GetSystemFirmwareTable, RSMB};
-use windows::Win32::System::Threading::{CreateMutexW, INFINITE, ReleaseMutex, WaitForSingleObject};
+use windows::Win32::System::Threading::{CreateMutexW, GetExitCodeProcess, INFINITE, ReleaseMutex, WaitForSingleObject};
 use windows::Win32::UI::Shell::{IsUserAnAdmin, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    IDYES, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MessageBoxW, SW_SHOWNORMAL,
+    IDYES, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MessageBoxW, SHOW_WINDOW_CMD, SW_HIDE, SW_SHOWNORMAL,
 };
 use windows::core::{HSTRING, s};
 use windows::Wdk::Graphics::Direct3D::{
@@ -297,22 +297,66 @@ fn ask(text: PCWSTR) -> bool {
 /// administrator rights and no UAC prompt, so the CPU temperature is always there.
 /// Only called from an elevated Vitals with PawnIO working.
 fn offer_autostart() {
-    let declined = std::env::var("APPDATA").map(|d| std::path::PathBuf::from(d).join("Vitals").join("autostart-declined"));
-    if declined.as_ref().is_ok_and(|p| p.exists()) || schtasks(&["/Query", "/TN", "Vitals"]) {
+    if declined_marker().is_some_and(|p| p.exists()) || schtasks(&["/Query", "/TN", "Vitals"]) {
         return;
     }
-    let text = w!("Start Vitals when you sign in?\n\nIt starts with administrator rights and no UAC prompt, so the CPU temperature is always shown. You can remove it later in Task Scheduler (task \"Vitals\").");
-    if !ask(text) {
-        if let Ok(path) = declined {
-            let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
-            let _ = std::fs::write(path, b"");
-        }
-        return;
+    let text = w!("Start Vitals when you sign in?\n\nIt starts with administrator rights and no UAC prompt, so the CPU temperature is always shown. You can change this later in the settings (gear button).");
+    if ask(text) {
+        create_task();
+    } else {
+        decline_autostart();
     }
+}
+
+/// Present once the user said no to starting at sign-in, so the offer above is not repeated.
+fn declined_marker() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPDATA").map(|d| std::path::PathBuf::from(d).join("Vitals").join("autostart-declined"))
+}
+
+fn decline_autostart() {
+    if let Some(path) = declined_marker() {
+        let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
+        let _ = std::fs::write(path, b"");
+    }
+}
+
+/// True when the sign-in task exists and starts this exe.
+pub fn autostart() -> bool {
+    use std::os::windows::process::CommandExt;
+    let task = std::process::Command::new("schtasks")
+        .args(["/Query", "/TN", "Vitals", "/XML"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stderr(std::process::Stdio::null())
+        .output();
+    let (Ok(task), Ok(exe)) = (task, std::env::current_exe()) else {
+        return false;
+    };
+    // The XML comes in a code page that varies, so only the ASCII characters
+    // of the path are compared (case-insensitive, as Windows paths are).
+    let ascii = |s: &str| s.chars().filter(|c| c.is_ascii_graphic() || *c == ' ').collect::<String>().to_lowercase();
+    let command = format!("<Command>{}</Command>", esc(&exe.to_string_lossy()));
+    task.status.success() && ascii(&String::from_utf8_lossy(&task.stdout)).contains(&ascii(&command))
+}
+
+/// Creates or deletes the sign-in task, through a UAC prompt when Vitals is not elevated.
+pub fn set_autostart(on: bool) {
+    if on {
+        create_task();
+    } else {
+        schtasks_admin(&["/Delete", "/TN", "Vitals", "/F"]);
+        decline_autostart();
+    }
+}
+
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// Registers the task "Vitals", which starts this exe at sign-in with administrator rights.
+fn create_task() {
     let (Ok(exe), Ok(domain), Ok(user)) = (std::env::current_exe(), std::env::var("USERDOMAIN"), std::env::var("USERNAME")) else {
         return;
     };
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     let user = esc(&format!("{domain}\\{user}"));
     // Not the schtasks defaults: no 72-hour time limit, and it also runs on battery.
     let xml = format!(
@@ -335,15 +379,29 @@ fn offer_autostart() {
     let bytes: Vec<u8> = std::iter::once(0xFEFFu16).chain(xml.encode_utf16()).flat_map(u16::to_le_bytes).collect();
     let file = std::env::temp_dir().join("vitals-task.xml");
     if std::fs::write(&file, bytes).is_ok() {
-        schtasks(&["/Create", "/TN", "Vitals", "/XML", &file.to_string_lossy(), "/F"]);
+        schtasks_admin(&["/Create", "/TN", "Vitals", "/XML", &file.to_string_lossy(), "/F"]);
         let _ = std::fs::remove_file(&file);
     }
 }
 
+/// schtasks for the task itself: it runs with administrator rights, so creating
+/// or deleting it from a non-elevated Vitals goes through a UAC prompt.
+fn schtasks_admin(args: &[&str]) -> bool {
+    if schtasks(args) {
+        return true;
+    }
+    if unsafe { IsUserAnAdmin() }.as_bool() {
+        return false;
+    }
+    let params = args.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>().join(" ");
+    run_elevated(std::ffi::OsStr::new("schtasks.exe"), &params, SW_HIDE)
+}
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Runs schtasks.exe without a console window; true when it succeeds.
 fn schtasks(args: &[&str]) -> bool {
     use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     std::process::Command::new("schtasks")
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
@@ -360,23 +418,32 @@ fn install_pawnio() {
     if std::fs::write(&path, PAWNIO_SETUP).is_err() {
         return;
     }
-    let file = HSTRING::from(path.as_os_str());
+    run_elevated(path.as_os_str(), "-install", SW_SHOWNORMAL);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Runs a program as administrator and waits for it; true when it exits with 0.
+/// From an elevated Vitals there is no UAC prompt.
+fn run_elevated(file: &std::ffi::OsStr, params: &str, show: SHOW_WINDOW_CMD) -> bool {
+    let (file, params) = (HSTRING::from(file), HSTRING::from(params));
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_NOCLOSEPROCESS,
         lpVerb: w!("runas"),
         lpFile: PCWSTR(file.as_ptr()),
-        lpParameters: w!("-install"),
-        nShow: SW_SHOWNORMAL.0,
+        lpParameters: PCWSTR(params.as_ptr()),
+        nShow: show.0,
         ..Default::default()
     };
+    let mut code = 1;
     unsafe {
         if ShellExecuteExW(&mut info).is_ok() && !info.hProcess.is_invalid() {
             WaitForSingleObject(info.hProcess, INFINITE);
+            let _ = GetExitCodeProcess(info.hProcess, &mut code);
             let _ = CloseHandle(info.hProcess);
         }
     }
-    let _ = std::fs::remove_file(&path);
+    code == 0
 }
 
 /// RAM type and speed from the SMBIOS memory device entries (type 17), the same

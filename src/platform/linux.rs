@@ -137,3 +137,36 @@ fn cards() -> Vec<Card> {
         })
         .collect()
 }
+
+/// Start at sign-in: an entry in ~/.config/autostart, the freedesktop way.
+fn autostart_entry() -> Option<(PathBuf, String)> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    let exe = std::env::current_exe().ok()?;
+    // Desktop Entry quoting: a backslash before " ` $ and \.
+    let mut quoted = String::new();
+    for c in exe.to_string_lossy().chars() {
+        if matches!(c, '"' | '`' | '$' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    let entry = format!("[Desktop Entry]\nType=Application\nName=Vitals\nExec=\"{quoted}\"\n");
+    Some((config.join("autostart").join("vitals.desktop"), entry))
+}
+
+/// True when the autostart entry exists and starts this executable.
+pub fn autostart() -> bool {
+    autostart_entry().is_some_and(|(path, entry)| fs::read_to_string(path).is_ok_and(|s| s == entry))
+}
+
+pub fn set_autostart(on: bool) {
+    let Some((path, entry)) = autostart_entry() else { return };
+    let _ = if on {
+        path.parent().map_or(Ok(()), fs::create_dir_all).and_then(|_| fs::write(&path, entry))
+    } else {
+        fs::remove_file(&path)
+    };
+}

@@ -26,7 +26,12 @@
 | Disk activity | Share of time each physical disk is busy (Task Manager's "active time") |
 | Temperature | CPU and GPU, plus the GPU fan speed. CPU turns amber at 90 °C and red at 95 °C (Ryzen 7000 runs at 95 °C by design), GPU at 80 °C and 90 °C |
 
-It samples once per second. The window shows one column when narrow and two when wide, remembers its size and position, and follows the system light or dark theme. It starts in **minimal mode**: one line of values per block, in a window sized to fit. The **Graphs** button in the middle of the top bar shows the graphs, and **Minimal** goes back. The mode is remembered. Everything except the Windows CPU temperature works without a driver or admin rights.
+It samples once per second. The window shows one column when narrow and two when wide, and remembers its size and position. It starts in **minimal mode**: one line of values per block, in a window sized to fit. The chart icon next to the version shows the graphs, and the rows icon goes back. The mode is remembered. Everything except the Windows CPU temperature works without a driver or admin rights.
+
+The gear icon next to it opens the settings:
+
+- **Theme**: System (the default, follows the OS), Light or Dark.
+- **Start at sign-in**: on Windows, a Task Scheduler task named `Vitals` that starts it with administrator rights (see below); changing it from a Vitals that is not running as administrator asks for a UAC confirmation. On Linux, an entry in `~/.config/autostart`. On macOS, a LaunchAgent in `~/Library/LaunchAgents`. It always starts the copy of Vitals you set it from, so set it again after moving the app.
 
 ## What each OS can show
 
@@ -50,7 +55,7 @@ Windows has no way to read an AMD CPU temperature without a kernel driver. Vital
 
 1. Right-click `vitals-windows-x64.exe`, then **Run as administrator**. The PawnIO device only accepts administrators.
 2. The first time, Vitals asks whether to install the bundled PawnIO 2.2.0 driver. Accept, and the CPU temperature appears.
-3. It then offers to start when you sign in, with administrator rights and no UAC prompt. This is a Task Scheduler task named `Vitals`; remove it there, or with `schtasks /Delete /TN Vitals /F`. If you move the exe, accept again from the new place.
+3. It then offers to start when you sign in, with administrator rights and no UAC prompt. This is the **Start at sign-in** setting (gear icon), where you can turn it off again.
 
 Without admin rights the legend shows `run as admin` and everything else works as usual. On an unsupported CPU it shows `AMD only`.
 

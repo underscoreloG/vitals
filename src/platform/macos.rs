@@ -167,3 +167,37 @@ fn number(dict: &CFDictionary, key: &str) -> Option<f64> {
         .and_then(|v| v.downcast_into::<CFNumber>())
         .and_then(|n| n.to_f64())
 }
+
+/// Start at sign-in: a LaunchAgent that launchd runs when the user logs in.
+fn launch_agent() -> Option<(std::path::PathBuf, String)> {
+    let home = std::env::var_os("HOME")?;
+    let exe = std::env::current_exe().ok()?;
+    let exe = exe.to_string_lossy().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>org.kvlh.vitals</string>
+  <key>ProgramArguments</key><array><string>{exe}</string></array>
+  <key>RunAtLoad</key><true/>
+</dict>
+</plist>
+"#
+    );
+    Some((std::path::Path::new(&home).join("Library/LaunchAgents/org.kvlh.vitals.plist"), plist))
+}
+
+/// True when the LaunchAgent exists and starts this executable.
+pub fn autostart() -> bool {
+    launch_agent().is_some_and(|(path, plist)| std::fs::read_to_string(path).is_ok_and(|s| s == plist))
+}
+
+pub fn set_autostart(on: bool) {
+    let Some((path, plist)) = launch_agent() else { return };
+    let _ = if on {
+        path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&path, plist))
+    } else {
+        std::fs::remove_file(&path)
+    };
+}

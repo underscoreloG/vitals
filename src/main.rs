@@ -7,7 +7,8 @@ mod theme;
 #[cfg_attr(target_os = "macos", path = "platform/macos.rs")]
 mod platform;
 
-use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Painter, Rect, RichText, Shape, Stroke, StrokeKind, pos2, vec2};
+use eframe::egui::containers::menu::{MenuButton, MenuConfig};
+use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Painter, Rect, RichText, Shape, Stroke, StrokeKind, ThemePreference, pos2, vec2};
 use sample::{Info, Sample, Sampler};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -58,6 +59,24 @@ struct App {
     minimal: bool,
     /// Window size to restore when leaving minimal mode.
     full_size: Option<egui::Vec2>,
+    /// Whether Vitals starts at sign-in, read from the OS; None while it is being read or changed.
+    autostart: Arc<Mutex<Option<bool>>>,
+    /// Last window geometry eframe saved while the window was not minimized.
+    window: Option<String>,
+}
+
+/// Optionally turns start at sign-in on or off, then reads it back, on a thread:
+/// on Windows this runs schtasks and may wait on a UAC prompt.
+fn refresh_autostart(slot: &Arc<Mutex<Option<bool>>>, ctx: &egui::Context, change: Option<bool>) {
+    *slot.lock().unwrap() = None;
+    let (slot, ctx) = (slot.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        if let Some(on) = change {
+            platform::set_autostart(on);
+        }
+        *slot.lock().unwrap() = Some(platform::autostart());
+        ctx.request_repaint();
+    });
 }
 
 impl App {
@@ -71,6 +90,7 @@ impl App {
             Some(vec2(w.parse().ok()?, h.parse().ok()?))
         });
         theme::apply(ctx);
+        let autostart = Arc::new(Mutex::new(None));
         let icon = eframe::icon_data::from_png_bytes(theme::ICON).expect("bundled icon is a valid PNG");
         let image = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
         let logo = ctx.load_texture("vitals-icon", image, egui::TextureOptions::LINEAR);
@@ -93,7 +113,7 @@ impl App {
                 repaint.request_repaint();
             }
         });
-        Self { state, logo, minimal, full_size }
+        Self { state, logo, minimal, full_size, autostart, window: saved("window") }
     }
 
     /// Switches mode and resizes the window: minimal fits its rows exactly,
@@ -109,10 +129,56 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         self.minimal = !self.minimal;
     }
+
+    /// Gear button with the theme choice and start at sign-in. egui saves the theme
+    /// with its own state and gives the window title bar the same theme.
+    fn settings(&mut self, ui: &mut egui::Ui) {
+        // Drawn by hand: the default fonts have no gear glyph.
+        let gear = egui::Button::new("").min_size(vec2(26.0, 24.0)).frame_when_inactive(false);
+        let config = MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        let (gear, _) = MenuButton::from_button(gear).config(config).ui(ui, |ui| {
+            ui.label(RichText::new("Theme").size(12.0).weak());
+            ui.horizontal(|ui| {
+                let mut theme = ui.ctx().options(|o| o.theme_preference);
+                for (value, label) in [(ThemePreference::System, "System"), (ThemePreference::Light, "Light"), (ThemePreference::Dark, "Dark")] {
+                    if ui.selectable_value(&mut theme, value, label).clicked() {
+                        ui.ctx().set_theme(theme);
+                    }
+                }
+            });
+            ui.separator();
+            let state = *self.autostart.lock().unwrap();
+            let mut on = state.unwrap_or(false);
+            if ui.add_enabled(state.is_some(), egui::Checkbox::new(&mut on, "Start at sign-in")).changed() {
+                refresh_autostart(&self.autostart, ui.ctx(), Some(on));
+            }
+        });
+        // Read when the menu opens, so a change made elsewhere (the first-run offer, Task Scheduler) shows.
+        if gear.clicked() {
+            refresh_autostart(&self.autostart, ui.ctx(), None);
+        }
+        let t = theme::tokens(ui.visuals().dark_mode);
+        let (c, color) = (gear.rect.center(), if gear.hovered() { t.fg } else { t.muted });
+        ui.painter().circle_stroke(c, 4.0, Stroke::new(1.6, color));
+        for i in 0..8 {
+            let dir = egui::Vec2::angled(i as f32 * std::f32::consts::FRAC_PI_4);
+            ui.painter().line_segment([c + dir * 4.6, c + dir * 7.0], Stroke::new(2.4, color));
+        }
+        gear.on_hover_text("Settings");
+    }
 }
 
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // eframe has just stored the window geometry. A minimized window on Windows is
+        // 0 x 0 at -32000, which would reopen as a tiny window off screen, so put back
+        // the last real geometry (an empty value makes eframe use the default size).
+        match storage.get_string("window") {
+            Some(window) if window.contains("inner_size_points:(x:0.0,y:0.0)") => {
+                storage.set_string("window", self.window.clone().unwrap_or_default());
+            }
+            window => self.window = window,
+        }
         storage.set_string("minimal", self.minimal.to_string());
         if let Some(size) = self.full_size {
             storage.set_string("full_size", format!("{} {}", size.x, size.y));
@@ -126,25 +192,33 @@ impl eframe::App for App {
 
         let frame = egui::Frame::new().fill(t.bg).inner_margin(12);
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
-            let mut left_end = 0.0;
-            let top = ui.horizontal(|ui| {
+            ui.horizontal(|ui| {
                 ui.add(egui::Image::new(&self.logo).fit_to_exact_size(vec2(22.0, 22.0)));
                 ui.label(RichText::new("Vitals").size(16.0).strong());
                 ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).size(12.0).color(t.muted));
-                left_end = ui.min_rect().right();
+                ui.spacing_mut().item_spacing.x = 2.0;
+
+                // Mode switch: a chart icon shows the graphs, a rows icon goes back to values only.
+                let button = ui.add(egui::Button::new("").min_size(vec2(26.0, 24.0)).frame_when_inactive(false));
+                let stroke = Stroke::new(1.6, if button.hovered() { t.fg } else { t.muted });
+                let at = |x: f32, y: f32| button.rect.center() + vec2(x, y);
+                if self.minimal {
+                    ui.painter().add(Shape::line(vec![at(-7.0, 4.0), at(-3.0, -1.0), at(1.0, 2.0), at(7.0, -5.0)], stroke));
+                    ui.painter().hline(at(-7.0, 0.0).x..=at(7.0, 0.0).x, at(0.0, 6.0).y, Stroke::new(1.0, stroke.color));
+                } else {
+                    for y in [-4.0, 0.0, 4.0] {
+                        ui.painter().hline(at(-6.0, 0.0).x..=at(6.0, 0.0).x, at(0.0, y).y, stroke);
+                    }
+                }
+                toggle = button.on_hover_text(if self.minimal { "Show graphs" } else { "Values only" }).clicked();
+                self.settings(ui);
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.label(RichText::new(".org").size(13.0).color(theme::ACCENT));
                     ui.label(RichText::new("kvlh").size(13.0).strong());
                 });
             });
-
-            // Mode switch, centered in the top bar; pushed right when the window is too narrow.
-            let label = if self.minimal { "Graphs" } else { "Minimal" };
-            let size = ui.painter().layout_no_wrap(label.into(), FontId::proportional(12.0), t.fg).size() + vec2(16.0, 6.0);
-            let bar = top.response.rect;
-            let center = pos2(bar.center().x.max(left_end + 8.0 + size.x / 2.0), bar.center().y);
-            toggle = ui.put(Rect::from_center_size(center, size), egui::Button::new(RichText::new(label).size(12.0))).clicked();
             ui.add_space(8.0);
 
             let area = ui.available_rect_before_wrap();
