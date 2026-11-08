@@ -63,6 +63,12 @@ struct App {
     autostart: Arc<Mutex<Option<bool>>>,
     /// Last window geometry eframe saved while the window was not minimized.
     window: Option<String>,
+    always_on_top: bool,
+}
+
+fn set_always_on_top(ctx: &egui::Context, on: bool) {
+    let level = if on { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
+    ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
 }
 
 /// Optionally turns start at sign-in on or off, then reads it back, on a thread:
@@ -90,6 +96,10 @@ impl App {
             Some(vec2(w.parse().ok()?, h.parse().ok()?))
         });
         theme::apply(ctx);
+        let always_on_top = saved("always_on_top").as_deref() == Some("true");
+        if always_on_top {
+            set_always_on_top(ctx, true);
+        }
         let autostart = Arc::new(Mutex::new(None));
         let icon = eframe::icon_data::from_png_bytes(theme::ICON).expect("bundled icon is a valid PNG");
         let image = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
@@ -113,7 +123,7 @@ impl App {
                 repaint.request_repaint();
             }
         });
-        Self { state, logo, minimal, full_size, autostart, window: saved("window") }
+        Self { state, logo, minimal, full_size, autostart, window: saved("window"), always_on_top }
     }
 
     /// Switches mode and resizes the window: minimal fits its rows exactly,
@@ -130,7 +140,7 @@ impl App {
         self.minimal = !self.minimal;
     }
 
-    /// Gear button with the theme choice and start at sign-in. egui saves the theme
+    /// Gear button with the theme choice, always on top and start at sign-in. egui saves the theme
     /// with its own state and gives the window title bar the same theme.
     fn settings(&mut self, ui: &mut egui::Ui) {
         // Drawn by hand: the default fonts have no gear glyph.
@@ -147,6 +157,9 @@ impl App {
                 }
             });
             ui.separator();
+            if ui.checkbox(&mut self.always_on_top, "Always on top").changed() {
+                set_always_on_top(ui.ctx(), self.always_on_top);
+            }
             let state = *self.autostart.lock().unwrap();
             let mut on = state.unwrap_or(false);
             if ui.add_enabled(state.is_some(), egui::Checkbox::new(&mut on, "Start at sign-in")).changed() {
@@ -180,6 +193,7 @@ impl eframe::App for App {
             window => self.window = window,
         }
         storage.set_string("minimal", self.minimal.to_string());
+        storage.set_string("always_on_top", self.always_on_top.to_string());
         if let Some(size) = self.full_size {
             storage.set_string("full_size", format!("{} {}", size.x, size.y));
         }

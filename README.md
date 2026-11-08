@@ -31,6 +31,7 @@ It samples once per second. The window shows one column when narrow and two when
 The gear icon next to it opens the settings:
 
 - **Theme**: System (the default, follows the OS), Light or Dark.
+- **Always on top**: keeps the window above other windows. Remembered.
 - **Start at sign-in**: on Windows, a Task Scheduler task named `Vitals` that starts it with administrator rights (see below); changing it from a Vitals that is not running as administrator asks for a UAC confirmation. On Linux, an entry in `~/.config/autostart`. On macOS, a LaunchAgent in `~/Library/LaunchAgents`. It always starts the copy of Vitals you set it from, so set it again after moving the app.
 
 ## What each OS can show
